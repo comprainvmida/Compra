@@ -88,8 +88,10 @@
   <p>Gracias. Sus datos ya están en la base de proveedores de <span class="emp"></span>. Para continuar el proceso, comuníquese con el departamento de compras:</p>
   <p><strong>Teléfono / WhatsApp:</strong> <a id="tel" href="#"></a></p>
   <p><strong>Correo:</strong> <a id="mail" href="#"></a></p>
+  <p id="warn" class="notice" hidden>Su registro se guardó, pero algunos documentos no se pudieron subir. Por favor envíelos por WhatsApp o correo.</p>
   <a class="btn-wa" id="wa" href="#" target="_blank" rel="noopener">Escribir por WhatsApp</a>
 </section>
+<footer class="staff"><a href="admin.html">Acceso del personal</a></footer>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
@@ -133,13 +135,6 @@ function checkFile(f) {
   if (f.size > MAX) return `“${f.name}” supera los 5 MB.`;
   return null;
 }
-async function upload(id, tag, file, i) {
-  const ext = (file.name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const path = `${id}/${tag}-${i}-${Date.now()}.${ext}`;
-  const { error } = await sb.storage.from("documentos").upload(path, file, { contentType: file.type });
-  if (error) throw error;
-  return path;
-}
 
 $("#f").addEventListener("submit", async e => {
   e.preventDefault();
@@ -164,23 +159,34 @@ $("#f").addEventListener("submit", async e => {
   for (const file of [rifFile, ...bancoFiles].filter(Boolean)) { const m = checkFile(file); if (m) return err.textContent = m; }
 
   btn.disabled = true; btn.textContent = "Enviando…";
+  const reset = () => { btn.disabled = false; btn.textContent = "Enviar registro"; };
+  const id = crypto.randomUUID();
+  const ext = x => (x.name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const rifPath = rifFile ? `${id}/rif-0.${ext(rifFile)}` : null;
+  const bancoPaths = bancoFiles.map((x, i) => `${id}/banco-${i}.${ext(x)}`);
   try {
-    const id = crypto.randomUUID();
-    const doc_rif = rifFile ? await upload(id, "rif", rifFile, 0) : null;
-    const docs_bancarios = [];
-    for (let i = 0; i < bancoFiles.length; i++) docs_bancarios.push(await upload(id, "banco", bancoFiles[i], i));
-
+    // Primero el registro: si el RIF ya existe se rechaza antes de subir archivos
     const { error } = await sb.from("proveedores").insert({
       id, razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif: rif || null,
       tipo_proveedor: f.tipo_proveedor.value, categorias: cats, descripcion: v("descripcion") || null,
       contacto_nombre: v("contacto_nombre"), contacto_cargo: v("contacto_cargo") || null,
       telefono: v("telefono"), email: v("email"), estado: v("estado") || null, ciudad: v("ciudad") || null,
-      direccion: v("direccion") || null,
-      condiciones_pago: v("condiciones_pago") || null, cuentas, doc_rif, docs_bancarios
+      direccion: v("direccion") || null, condiciones_pago: v("condiciones_pago") || null,
+      cuentas, doc_rif: rifPath, docs_bancarios: bancoPaths
     });
-    if (error) throw error;
-
-    f.hidden = true;
+    if (error) {
+      err.textContent = error.code === "23505"
+        ? `Este RIF o cédula ya está registrado en nuestra lista. Si necesita actualizar sus datos, comuníquese con compras: ${CFG.TELEFONO_VISIBLE}.`
+        : "No se pudo enviar el registro. Revise sus datos e intente de nuevo.";
+      return reset();
+    }
+    let fallo = false;
+    const jobs = [[rifPath, rifFile], ...bancoPaths.map((p, i) => [p, bancoFiles[i]])].filter(([p]) => p);
+    for (const [p, file] of jobs) {
+      const { error: e2 } = await sb.storage.from("documentos").upload(p, file, { contentType: file.type });
+      if (e2) fallo = true;
+    }
+    f.hidden = true; $("#warn").hidden = !fallo;
     $("#tel").textContent = CFG.TELEFONO_VISIBLE; $("#tel").href = "tel:+" + CFG.WHATSAPP;
     $("#mail").textContent = CFG.EMAIL; $("#mail").href = "mailto:" + CFG.EMAIL;
     $("#wa").href = `https://wa.me/${CFG.WHATSAPP}?text=` + encodeURIComponent(`Hola, soy de ${v("razon_social")} y acabo de registrarme como proveedor.`);
@@ -188,7 +194,7 @@ $("#f").addEventListener("submit", async e => {
   } catch (x) {
     console.error(x);
     err.textContent = "No se pudo enviar el registro. Revise su conexión e intente de nuevo.";
-    btn.disabled = false; btn.textContent = "Enviar registro";
+    reset();
   }
 });
 </script>
