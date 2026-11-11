@@ -30,11 +30,11 @@
     <input type="search" id="q" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
     <select id="fs" aria-label="Filtrar por estatus">
       <option value="">Todos los estatus</option><option value="nuevo">Nuevo</option><option value="en_revision">En revisión</option>
-      <option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option>
+      <option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option><option value="dup">Posibles duplicados</option>
     </select>
     <select id="fc" aria-label="Filtrar por categoría"></select>
     <button id="new" class="primary" style="padding:9px 16px">Nuevo proveedor</button>
-    <button id="csv">Exportar a Excel (CSV)</button>
+    <button id="csv">Exportar a Excel</button>
     <button id="out">Salir</button>
   </div>
   <div class="tablebox"><table>
@@ -47,13 +47,24 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="config.js"></script>
 <script>
 const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ST = { nuevo:"Nuevo", en_revision:"En revisión", aprobado:"Aprobado", rechazado:"Rechazado" };
-let DATA = [];
+let DATA = [], DUP = new Map();
+const nk = t => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+function computeDup() {
+  const g = new Map(); DUP = new Map();
+  DATA.forEach(p => [["RIF", p.rif], ["correo", p.email], ["razón social", p.razon_social]].forEach(([w, val]) => {
+    const k = nk(val); if (!k) return; const key = w + k; if (!g.has(key)) g.set(key, []); g.get(key).push([p, w]);
+  }));
+  g.forEach(list => { if (list.length < 2) return; list.forEach(([p, w]) => list.forEach(([q]) => {
+    if (q.id === p.id) return; if (!DUP.has(p.id)) DUP.set(p.id, []); DUP.get(p.id).push({ name: q.razon_social, why: w });
+  })); });
+}
 
 async function boot() {
   const { data: { session } } = await sb.auth.getSession();
@@ -70,19 +81,19 @@ $("#out").onclick = async () => { await sb.auth.signOut(); boot(); };
 async function load() {
   const { data, error } = await sb.from("proveedores").select("*").order("created_at", { ascending: false });
   if (error) { $("#count").textContent = "No se pudieron cargar los datos."; return; }
-  DATA = data;
+  DATA = data; computeDup();
   const cur = $("#fc").value;
   $("#fc").innerHTML = '<option value="">Todas las categorías</option>' + [...new Set([...CATS, ...DATA.flatMap(p => p.categorias || [])])].map(c => `<option>${esc(c)}</option>`).join("");
   $("#fc").value = cur; render();
 }
 function filtered() {
   const q = $("#q").value.toLowerCase().trim(), s = $("#fs").value, c = $("#fc").value;
-  return DATA.filter(p => (!s || p.estatus === s) && (!c || (p.categorias || []).includes(c)) &&
+  return DATA.filter(p => (!s || (s === "dup" ? DUP.has(p.id) : p.estatus === s)) && (!c || (p.categorias || []).includes(c)) &&
     (!q || [p.razon_social, p.nombre_comercial, p.rif, p.contacto_nombre, p.email, (p.categorias || []).join(" ")].join(" ").toLowerCase().includes(q)));
 }
 function render() {
   const n = k => DATA.filter(p => p.estatus === k).length, cur = $("#fs").value;
-  $("#stats").innerHTML = [["", "Total", DATA.length], ["nuevo", "Nuevos", n("nuevo")], ["en_revision", "En revisión", n("en_revision")], ["aprobado", "Aprobados", n("aprobado")], ["rechazado", "Rechazados", n("rechazado")]]
+  $("#stats").innerHTML = [["", "Total", DATA.length], ["nuevo", "Nuevos", n("nuevo")], ["en_revision", "En revisión", n("en_revision")], ["aprobado", "Aprobados", n("aprobado")], ["rechazado", "Rechazados", n("rechazado")], ...(DUP.size ? [["dup", "Duplicados", DUP.size]] : [])]
     .map(([k, l, c]) => `<button class="stat ${cur === k ? "on" : ""}" data-s="${k}"><strong>${c}</strong> ${l}</button>`).join("");
   const list = filtered();
   $("#count").textContent = `${list.length} de ${DATA.length} proveedores`;
@@ -92,7 +103,7 @@ function render() {
     <td>${esc((p.categorias || []).slice(0, 2).join(", "))}${p.categorias?.length > 2 ? ` +${p.categorias.length - 2}` : ""}</td>
     <td>${esc(p.contacto_nombre)}<br><span class="hint">${esc(p.telefono)}</span></td>
     <td>${new Date(p.created_at).toLocaleDateString("es-VE")}</td>
-    <td><span class="tag ${p.estatus}">${ST[p.estatus]}</span></td></tr>`).join("")
+    <td><span class="tag ${p.estatus}">${ST[p.estatus]}</span>${DUP.has(p.id) ? '<br><span class="tag dup">Posible duplicado</span>' : ""}</td></tr>`).join("")
     : `<tr><td colspan="6">Aún no hay proveedores que coincidan.</td></tr>`;
 }
 $("#q").oninput = render; $("#fs").onchange = render; $("#fc").onchange = render;
@@ -135,6 +146,7 @@ async function openDetail(id) {
   const cats = [...new Set([...CATS, ...(p.categorias || [])])];
   const wa = "https://wa.me/" + p.telefono.replace(/\D/g, "").replace(/^0/, "58");
   d.innerHTML = `<form id="ef"><h2>${isNew ? "Nuevo proveedor" : "Editar proveedor"}</h2>
+  ${DUP.has(p.id) ? `<p class="notice"><strong>Posible duplicado:</strong> ${DUP.get(p.id).map(d => `${esc(d.name)} (mismo ${d.why})`).join("; ")}.</p>` : ""}
   ${isNew ? "" : `<p class="hint" style="margin:0 0 14px">Registrado el ${new Date(p.created_at).toLocaleDateString("es-VE")} ·
     <a href="${wa}" target="_blank" rel="noopener">WhatsApp</a> · <a href="mailto:${esc(p.email)}">Enviar correo</a></p>`}
   <fieldset><legend>Empresa</legend>
@@ -223,13 +235,71 @@ async function openDetail(id) {
   };
 }
 
-$("#csv").onclick = () => {
-  const cols = ["created_at","estatus","razon_social","nombre_comercial","rif","tipo_proveedor","categorias","contacto_nombre","contacto_cargo","telefono","email","estado","ciudad","direccion","condiciones_pago","notas_internas"];
-  const cell = v => `"${String(Array.isArray(v) ? v.join("; ") : v ?? "").replace(/"/g, '""')}"`;
-  const csv = "\ufeff" + [cols.join(","), ...filtered().map(p => cols.map(c => cell(p[c])).join(","))].join("\r\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-  a.download = `proveedores-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+$("#csv").onclick = async () => {
+  const list = filtered();
+  if (!list.length) return alert("No hay proveedores para exportar.");
+  const btn = $("#csv"); btn.disabled = true; btn.textContent = "Generando…";
+  try {
+    const wb = new ExcelJS.Workbook(); wb.creator = CFG.EMPRESA;
+    const style = ws => {
+      const r = ws.getRow(1);
+      r.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      r.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E5A3C" } };
+      r.alignment = { vertical: "middle", wrapText: true }; r.height = 28;
+      ws.eachRow((row, i) => { if (i > 1) row.alignment = { vertical: "top", wrapText: true }; });
+      ws.views = [{ state: "frozen", ySplit: 1 }];
+      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columnCount } };
+    };
+    const cap = t => t ? t[0].toUpperCase() + t.slice(1) : "";
+    const ws = wb.addWorksheet("Proveedores");
+    ws.columns = [
+      { header: "Fecha de registro", key: "fecha", width: 16, style: { numFmt: "dd/mm/yyyy" } },
+      { header: "Estatus", key: "estatus", width: 14 },
+      { header: "Razón social", key: "razon", width: 34 },
+      { header: "Nombre comercial", key: "comercial", width: 28 },
+      { header: "RIF / Cédula", key: "rif", width: 16 },
+      { header: "Tipo", key: "tipo", width: 12 },
+      { header: "Categorías", key: "cats", width: 40 },
+      { header: "Descripción", key: "desc", width: 45 },
+      { header: "Contacto", key: "contacto", width: 26 },
+      { header: "Cargo", key: "cargo", width: 20 },
+      { header: "Teléfono", key: "tel", width: 16 },
+      { header: "Correo", key: "email", width: 32 },
+      { header: "Estado", key: "estado", width: 16 },
+      { header: "Ciudad", key: "ciudad", width: 16 },
+      { header: "Dirección", key: "dir", width: 40 },
+      { header: "Condiciones de pago", key: "pago", width: 28 },
+      { header: "RIF / cédula cargado", key: "docrif", width: 14 },
+      { header: "Soportes bancarios cargados", key: "docbanco", width: 16 },
+      { header: "Notas internas", key: "notas", width: 40 }
+    ];
+    list.forEach(p => ws.addRow({
+      fecha: new Date(p.created_at), estatus: ST[p.estatus], razon: p.razon_social, comercial: p.nombre_comercial || "",
+      rif: p.rif || "", tipo: cap(p.tipo_proveedor), cats: (p.categorias || []).join(", "), desc: p.descripcion || "",
+      contacto: p.contacto_nombre, cargo: p.contacto_cargo || "", tel: p.telefono, email: p.email, estado: p.estado || "",
+      ciudad: p.ciudad || "", dir: p.direccion || "", pago: p.condiciones_pago || "",
+      docrif: p.doc_rif ? "Sí" : "No", docbanco: (p.docs_bancarios || []).length, notas: p.notas_internas || ""
+    }));
+    style(ws);
+
+    const w2 = wb.addWorksheet("Cuentas bancarias");
+    w2.columns = [
+      { header: "Razón social", key: "razon", width: 34 }, { header: "RIF / Cédula", key: "rif", width: 16 },
+      { header: "Banco", key: "banco", width: 24 }, { header: "Tipo de cuenta", key: "tipo", width: 14 },
+      { header: "Moneda", key: "moneda", width: 10 }, { header: "Número de cuenta", key: "num", width: 28, style: { numFmt: "@" } },
+      { header: "Titular", key: "titular", width: 32 }
+    ];
+    list.forEach(p => (p.cuentas || []).forEach(c => w2.addRow({
+      razon: p.razon_social, rif: p.rif || "", banco: c.banco || "", tipo: c.tipo || "", moneda: c.moneda || "", num: String(c.numero || ""), titular: c.titular || ""
+    })));
+    style(w2);
+
+    const buf = await wb.xlsx.writeBuffer();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    a.download = `proveedores-${new Date().toISOString().slice(0, 10)}.xlsx`; a.click();
+  } catch (x) { console.error(x); alert("No se pudo generar el Excel."); }
+  finally { btn.disabled = false; btn.textContent = "Exportar a Excel"; }
 };
 boot();
 </script>
