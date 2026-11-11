@@ -65,8 +65,8 @@
   </fieldset>
 
   <fieldset>
-    <legend>Cuentas bancarias</legend>
-    <p class="notice"><strong>Si sube el soporte de su cuenta bancaria (foto o PDF), no es necesario llenar los datos de la cuenta.</strong> Llene los datos solo si no tiene el soporte a la mano.</p>
+    <legend>Cuentas bancarias <span class="hint">(opcional)</span></legend>
+    <p class="notice"><strong>Si sube el soporte de su cuenta bancaria (foto o PDF), no es necesario llenar los datos de la cuenta.</strong> Este paso es opcional: puede registrarse sin datos bancarios y enviarlos después.</p>
     <div id="cuentas"></div>
     <button type="button" id="addc">Agregar cuenta</button>
     <label style="margin-top:20px">Soporte de cuenta bancaria <span class="hint">(carátula, certificación o captura; PDF o foto, puede elegir varios, máx. 5 MB cada uno)</span>
@@ -161,7 +161,6 @@ $("#f").addEventListener("submit", async e => {
   if (rif === null) return err.textContent = "El RIF o la cédula no es válido. Ejemplos: J-12345678-9 o V-12345678.";
   if (!/^\S+@\S+\.\S+$/.test(v("email"))) return err.textContent = "Revise el correo electrónico.";
   if (!cats.length) return err.textContent = "Marque al menos una categoría de lo que comercializa.";
-  if (!bancoFiles.length && !cuentas.length) return err.textContent = "Suba el soporte de su cuenta bancaria o llene los datos de la cuenta.";
   for (const file of [rifFile, ...bancoFiles].filter(Boolean)) { const m = checkFile(file); if (m) return err.textContent = m; }
 
   btn.disabled = true; btn.textContent = "Enviando…";

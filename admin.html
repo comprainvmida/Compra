@@ -25,12 +25,15 @@
 
 <section id="app" hidden>
   <header class="top brand"><img src="logo.png" alt="Logo de Quidy" width="84" height="84"><div><h1>Proveedores registrados</h1><p class="lead" id="count"></p></div></header>
+  <div class="stats" id="stats"></div>
   <div class="bar">
     <input type="search" id="q" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
     <select id="fs" aria-label="Filtrar por estatus">
       <option value="">Todos los estatus</option><option value="nuevo">Nuevo</option><option value="en_revision">En revisión</option>
       <option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option>
     </select>
+    <select id="fc" aria-label="Filtrar por categoría"></select>
+    <button id="new" class="primary" style="padding:9px 16px">Nuevo proveedor</button>
     <button id="csv">Exportar a Excel (CSV)</button>
     <button id="out">Salir</button>
   </div>
@@ -67,14 +70,20 @@ $("#out").onclick = async () => { await sb.auth.signOut(); boot(); };
 async function load() {
   const { data, error } = await sb.from("proveedores").select("*").order("created_at", { ascending: false });
   if (error) { $("#count").textContent = "No se pudieron cargar los datos."; return; }
-  DATA = data; render();
+  DATA = data;
+  const cur = $("#fc").value;
+  $("#fc").innerHTML = '<option value="">Todas las categorías</option>' + [...new Set([...CATS, ...DATA.flatMap(p => p.categorias || [])])].map(c => `<option>${esc(c)}</option>`).join("");
+  $("#fc").value = cur; render();
 }
 function filtered() {
-  const q = $("#q").value.toLowerCase().trim(), s = $("#fs").value;
-  return DATA.filter(p => (!s || p.estatus === s) &&
+  const q = $("#q").value.toLowerCase().trim(), s = $("#fs").value, c = $("#fc").value;
+  return DATA.filter(p => (!s || p.estatus === s) && (!c || (p.categorias || []).includes(c)) &&
     (!q || [p.razon_social, p.nombre_comercial, p.rif, p.contacto_nombre, p.email, (p.categorias || []).join(" ")].join(" ").toLowerCase().includes(q)));
 }
 function render() {
+  const n = k => DATA.filter(p => p.estatus === k).length, cur = $("#fs").value;
+  $("#stats").innerHTML = [["", "Total", DATA.length], ["nuevo", "Nuevos", n("nuevo")], ["en_revision", "En revisión", n("en_revision")], ["aprobado", "Aprobados", n("aprobado")], ["rechazado", "Rechazados", n("rechazado")]]
+    .map(([k, l, c]) => `<button class="stat ${cur === k ? "on" : ""}" data-s="${k}"><strong>${c}</strong> ${l}</button>`).join("");
   const list = filtered();
   $("#count").textContent = `${list.length} de ${DATA.length} proveedores`;
   $("#rows").innerHTML = list.length ? list.map(p => `<tr data-id="${p.id}">
@@ -86,7 +95,9 @@ function render() {
     <td><span class="tag ${p.estatus}">${ST[p.estatus]}</span></td></tr>`).join("")
     : `<tr><td colspan="6">Aún no hay proveedores que coincidan.</td></tr>`;
 }
-$("#q").oninput = render; $("#fs").onchange = render;
+$("#q").oninput = render; $("#fs").onchange = render; $("#fc").onchange = render;
+$("#stats").onclick = e => { const b = e.target.closest("[data-s]"); if (b) { $("#fs").value = b.dataset.s; render(); } };
+$("#new").onclick = () => openDetail(null);
 $("#rows").onclick = e => { const tr = e.target.closest("tr[data-id]"); if (tr) openDetail(tr.dataset.id); };
 
 const CATS = ["Materias primas e ingredientes","Empaques y embalajes","Insumos de producción","Maquinaria y repuestos","Mantenimiento y reparaciones","Transporte y logística","Limpieza e higiene","Papelería y oficina","Tecnología y software","Servicios profesionales","Seguridad industrial / EPP","Otros"];
@@ -117,13 +128,15 @@ function docRow(d, label) {
 const fileErr = f => !OK_TYPES.includes(f.type) ? `“${f.name}” debe ser PDF o imagen.` : f.size > MAX ? `“${f.name}” supera los 5 MB.` : null;
 
 async function openDetail(id) {
-  const p = DATA.find(x => x.id === id), d = $("#dlg");
+  const isNew = !id;
+  const p = isNew ? { id: crypto.randomUUID(), created_at: new Date().toISOString(), estatus: "nuevo", tipo_proveedor: "productos", categorias: [], cuentas: [], docs_bancarios: [], doc_rif: null, telefono: "", email: "" } : DATA.find(x => x.id === id), d = $("#dlg");
+  id = p.id;
   const rifL = p.doc_rif ? await signed([p.doc_rif]) : [], bancoL = await signed(p.docs_bancarios);
   const cats = [...new Set([...CATS, ...(p.categorias || [])])];
   const wa = "https://wa.me/" + p.telefono.replace(/\D/g, "").replace(/^0/, "58");
-  d.innerHTML = `<form id="ef"><h2>Editar proveedor</h2>
-  <p class="hint" style="margin:0 0 14px">Registrado el ${new Date(p.created_at).toLocaleDateString("es-VE")} ·
-    <a href="${wa}" target="_blank" rel="noopener">WhatsApp</a> · <a href="mailto:${esc(p.email)}">Enviar correo</a></p>
+  d.innerHTML = `<form id="ef"><h2>${isNew ? "Nuevo proveedor" : "Editar proveedor"}</h2>
+  ${isNew ? "" : `<p class="hint" style="margin:0 0 14px">Registrado el ${new Date(p.created_at).toLocaleDateString("es-VE")} ·
+    <a href="${wa}" target="_blank" rel="noopener">WhatsApp</a> · <a href="mailto:${esc(p.email)}">Enviar correo</a></p>`}
   <fieldset><legend>Empresa</legend>
     ${inp("razon_social", "Razón social *", p.razon_social)}${inp("nombre_comercial", "Nombre comercial", p.nombre_comercial)}
     <div class="row">${inp("rif", "RIF o cédula", p.rif)}
@@ -148,7 +161,7 @@ async function openDetail(id) {
     ${ta("notas_internas", "Notas internas", p.notas_internas)}</fieldset>
   <div class="err" id="d_err" role="alert"></div>
   <div class="bar"><button class="primary" type="submit" id="d_save">Guardar cambios</button><button type="button" id="d_close">Cerrar</button>
-  <button type="button" id="d_del" style="margin-left:auto;color:var(--danger);border-color:var(--danger)">Eliminar proveedor</button></div></form>`;
+  <button type="button" id="d_del" ${isNew ? "hidden" : ""} style="margin-left:auto;color:var(--danger);border-color:var(--danger)">Eliminar proveedor</button></div></form>`;
   d.showModal();
 
   const f = $("#ef"), v = n => f[n].value.trim(), box = $("#e_cuentas");
@@ -183,14 +196,15 @@ async function openDetail(id) {
       const docs = (p.docs_bancarios || []).filter(x => !dels.includes(x));
       for (let i = 0; i < newBanco.length; i++) docs.push(await up("banco", newBanco[i], i));
 
-      const { error } = await sb.from("proveedores").update({
+      const payload = {
         razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif: v("rif").toUpperCase() || null,
         tipo_proveedor: f.tipo_proveedor.value, categorias: cats, descripcion: v("descripcion") || null,
         contacto_nombre: v("contacto_nombre"), contacto_cargo: v("contacto_cargo") || null, telefono: v("telefono"), email: v("email"),
         estado: v("estado") || null, ciudad: v("ciudad") || null, direccion: v("direccion") || null,
         condiciones_pago: v("condiciones_pago") || null, cuentas, doc_rif, docs_bancarios: docs,
         estatus: f.estatus.value, notas_internas: v("notas_internas") || null
-      }).eq("id", id);
+      };
+      const { error } = isNew ? await sb.from("proveedores").insert({ id, ...payload }) : await sb.from("proveedores").update(payload).eq("id", id);
       if (error) throw error;
       if (remove.length) await sb.storage.from("documentos").remove([...new Set(remove)]);
       d.close(); load();
@@ -199,7 +213,7 @@ async function openDetail(id) {
       btn.disabled = false; btn.textContent = "Guardar cambios";
     }
   };
-  $("#d_del").onclick = async () => {
+  if (!isNew) $("#d_del").onclick = async () => {
     if (!confirm(`¿Eliminar a ${p.razon_social} y sus documentos? No se puede deshacer.`)) return;
     const paths = [p.doc_rif, ...(p.docs_bancarios || [])].filter(Boolean);
     if (paths.length) await sb.storage.from("documentos").remove(paths);

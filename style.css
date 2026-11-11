@@ -69,3 +69,7 @@ dialog{max-height:92vh;width:min(760px,94vw)}
 dialog fieldset{margin-bottom:10px}
 .docrow{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:4px 0}
 .docrow label{margin:0;font-weight:400;display:flex;gap:6px;white-space:nowrap}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.stat{border-color:var(--line);color:var(--ink);background:var(--surface)}
+.stat strong{font-size:1.15rem;margin-right:4px;color:var(--green)}
+.stat.on{border-color:var(--amber);box-shadow:inset 0 -3px 0 var(--amber)}
