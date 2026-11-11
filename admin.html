@@ -79,7 +79,7 @@ function render() {
   $("#count").textContent = `${list.length} de ${DATA.length} proveedores`;
   $("#rows").innerHTML = list.length ? list.map(p => `<tr data-id="${p.id}">
     <td><strong>${esc(p.razon_social)}</strong><br><span class="hint">${esc(p.nombre_comercial || "")}</span></td>
-    <td>${esc(p.rif)}</td>
+    <td>${esc(p.rif || "—")}</td>
     <td>${esc((p.categorias || []).slice(0, 2).join(", "))}${p.categorias?.length > 2 ? ` +${p.categorias.length - 2}` : ""}</td>
     <td>${esc(p.contacto_nombre)}<br><span class="hint">${esc(p.telefono)}</span></td>
     <td>${new Date(p.created_at).toLocaleDateString("es-VE")}</td>
@@ -89,45 +89,120 @@ function render() {
 $("#q").oninput = render; $("#fs").onchange = render;
 $("#rows").onclick = e => { const tr = e.target.closest("tr[data-id]"); if (tr) openDetail(tr.dataset.id); };
 
+const CATS = ["Materias primas e ingredientes","Empaques y embalajes","Insumos de producción","Maquinaria y repuestos","Mantenimiento y reparaciones","Transporte y logística","Limpieza e higiene","Papelería y oficina","Tecnología y software","Servicios profesionales","Seguridad industrial / EPP","Otros"];
+const OK_TYPES = ["application/pdf","image/jpeg","image/png","image/webp"], MAX = 5 * 1024 * 1024;
+const inp = (n, l, v, t = "text") => `<label>${l}<input type="${t}" name="${n}" value="${esc(v)}"></label>`;
+const ta = (n, l, v) => `<label>${l}<textarea name="${n}">${esc(v)}</textarea></label>`;
+const opts = (list, cur) => list.map(([k, t]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${t}</option>`).join("");
+
 async function signed(paths) {
-  return Promise.all((paths || []).map(async (p, i) => {
+  return Promise.all((paths || []).map(async p => {
     const { data } = await sb.storage.from("documentos").createSignedUrl(p, 600);
-    return data ? { url: data.signedUrl, name: p.split("/").pop() } : null;
+    return { path: p, url: data?.signedUrl, name: p.split("/").pop() };
   }));
 }
+function cuentaHTML(c = {}) {
+  return `<div class="cuenta"><div class="row">
+    ${inp("", "Banco", c.banco || "").replace('name=""', 'data-k="banco"')}
+    <label>Moneda<select data-k="moneda">${opts([["Bs.", "Bs."], ["USD", "USD"]], c.moneda)}</select></label></div>
+    <div class="row"><label>Tipo<select data-k="tipo">${opts([["Corriente", "Corriente"], ["Ahorro", "Ahorro"], ["Otra", "Otra"]], c.tipo)}</select></label>
+    ${inp("", "Número de cuenta", c.numero || "").replace('name=""', 'data-k="numero"')}</div>
+    ${inp("", "Titular", c.titular || "").replace('name=""', 'data-k="titular"')}
+    <button type="button" data-rm style="margin-bottom:14px">Quitar cuenta</button></div>`;
+}
+function docRow(d, label) {
+  return `<div class="docrow">${d.url ? `<a href="${d.url}" target="_blank" rel="noopener">${label}: ${esc(d.name)}</a>` : `<span>${label}: no disponible</span>`}
+    <label><input type="checkbox" data-del="${esc(d.path)}"> Quitar</label></div>`;
+}
+const fileErr = f => !OK_TYPES.includes(f.type) ? `“${f.name}” debe ser PDF o imagen.` : f.size > MAX ? `“${f.name}” supera los 5 MB.` : null;
+
 async function openDetail(id) {
   const p = DATA.find(x => x.id === id), d = $("#dlg");
-  const rif = await signed([p.doc_rif]), bancos = await signed(p.docs_bancarios);
-  const link = (l, t) => l.filter(Boolean).map(x => `<a href="${x.url}" target="_blank" rel="noopener">${t}: ${esc(x.name)}</a>`).join("");
-  const cuentas = (p.cuentas || []).map(c => `${esc(c.banco)} · ${esc(c.tipo)} · ${esc(c.moneda)} · ${esc(c.numero)} · ${esc(c.titular)}`).join("<br>") || "—";
-  d.innerHTML = `<h2>${esc(p.razon_social)}</h2><p class="hint" style="margin:0 0 14px">${esc(p.nombre_comercial || "")}</p>
-  <dl>
-    <dt>RIF</dt><dd>${esc(p.rif)}</dd>
-    <dt>Ofrece</dt><dd>${esc(p.tipo_proveedor)}: ${esc((p.categorias || []).join(", "))}</dd>
-    <dt>Descripción</dt><dd>${esc(p.descripcion || "—")}</dd>
-    <dt>Contacto</dt><dd>${esc(p.contacto_nombre)} ${p.contacto_cargo ? "(" + esc(p.contacto_cargo) + ")" : ""}</dd>
-    <dt>Teléfono</dt><dd><a href="https://wa.me/${esc(p.telefono.replace(/\D/g, "").replace(/^0/, "58"))}" target="_blank" rel="noopener">${esc(p.telefono)}</a></dd>
-    <dt>Correo</dt><dd><a href="mailto:${esc(p.email)}">${esc(p.email)}</a></dd>
-    <dt>Ubicación</dt><dd>${esc([p.ciudad, p.estado].filter(Boolean).join(", "))} ${esc(p.direccion || "")}</dd>
-    <dt>Condiciones de pago</dt><dd>${esc(p.condiciones_pago || "No indicadas")}</dd>
-    <dt>Cuentas</dt><dd>${cuentas}</dd>
-    <dt>Documentos</dt><dd class="docs">${link(rif, "RIF")}${link(bancos, "Banco")}</dd>
-  </dl>
-  <label>Estatus<select id="d_st">${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${k === p.estatus ? "selected" : ""}>${v}</option>`).join("")}</select></label>
-  <label>Notas internas<textarea id="d_nt">${esc(p.notas_internas || "")}</textarea></label>
-  <div class="err" id="d_err"></div>
-  <div class="bar"><button class="primary" id="d_save">Guardar cambios</button><button id="d_close">Cerrar</button>
-  <button id="d_del" style="margin-left:auto;color:var(--danger);border-color:var(--danger)">Eliminar proveedor</button></div>`;
+  const rifL = p.doc_rif ? await signed([p.doc_rif]) : [], bancoL = await signed(p.docs_bancarios);
+  const cats = [...new Set([...CATS, ...(p.categorias || [])])];
+  const wa = "https://wa.me/" + p.telefono.replace(/\D/g, "").replace(/^0/, "58");
+  d.innerHTML = `<form id="ef"><h2>Editar proveedor</h2>
+  <p class="hint" style="margin:0 0 14px">Registrado el ${new Date(p.created_at).toLocaleDateString("es-VE")} ·
+    <a href="${wa}" target="_blank" rel="noopener">WhatsApp</a> · <a href="mailto:${esc(p.email)}">Enviar correo</a></p>
+  <fieldset><legend>Empresa</legend>
+    ${inp("razon_social", "Razón social *", p.razon_social)}${inp("nombre_comercial", "Nombre comercial", p.nombre_comercial)}
+    <div class="row">${inp("rif", "RIF o cédula", p.rif)}
+      <label>Tipo<select name="tipo_proveedor">${opts([["productos", "Productos"], ["servicios", "Servicios"], ["ambos", "Ambos"]], p.tipo_proveedor)}</select></label></div>
+    <div class="row">${inp("estado", "Estado", p.estado)}${inp("ciudad", "Ciudad", p.ciudad)}</div>
+    ${ta("direccion", "Dirección", p.direccion)}</fieldset>
+  <fieldset><legend>Qué comercializa</legend>
+    <div class="checks">${cats.map(c => `<label><input type="checkbox" name="cat" value="${esc(c)}" ${(p.categorias || []).includes(c) ? "checked" : ""}> ${esc(c)}</label>`).join("")}</div>
+    ${ta("descripcion", "Descripción", p.descripcion)}</fieldset>
+  <fieldset><legend>Contacto y pago</legend>
+    <div class="row">${inp("contacto_nombre", "Nombre del contacto *", p.contacto_nombre)}${inp("contacto_cargo", "Cargo", p.contacto_cargo)}</div>
+    <div class="row">${inp("telefono", "Teléfono *", p.telefono, "tel")}${inp("email", "Correo *", p.email, "email")}</div>
+    ${inp("condiciones_pago", "Condiciones de pago", p.condiciones_pago)}</fieldset>
+  <fieldset><legend>Cuentas bancarias</legend><div id="e_cuentas">${(p.cuentas || []).map(cuentaHTML).join("")}</div>
+    <button type="button" id="e_addc">Agregar cuenta</button></fieldset>
+  <fieldset><legend>Documentos</legend>
+    <div class="docs">${rifL.map(x => docRow(x, "RIF")).join("")}${bancoL.map(x => docRow(x, "Banco")).join("") || (rifL.length ? "" : '<p class="hint">Sin documentos.</p>')}</div>
+    <label style="margin-top:12px">${p.doc_rif ? "Reemplazar RIF / cédula" : "Subir RIF / cédula"}<input type="file" id="n_rif" accept="application/pdf,image/*"></label>
+    <label>Agregar soporte bancario<input type="file" id="n_banco" accept="application/pdf,image/*" multiple></label></fieldset>
+  <fieldset><legend>Gestión interna</legend>
+    <label>Estatus<select name="estatus">${opts(Object.entries(ST), p.estatus)}</select></label>
+    ${ta("notas_internas", "Notas internas", p.notas_internas)}</fieldset>
+  <div class="err" id="d_err" role="alert"></div>
+  <div class="bar"><button class="primary" type="submit" id="d_save">Guardar cambios</button><button type="button" id="d_close">Cerrar</button>
+  <button type="button" id="d_del" style="margin-left:auto;color:var(--danger);border-color:var(--danger)">Eliminar proveedor</button></div></form>`;
   d.showModal();
+
+  const f = $("#ef"), v = n => f[n].value.trim(), box = $("#e_cuentas");
+  box.onclick = e => { if (e.target.matches("[data-rm]")) e.target.closest(".cuenta").remove(); };
+  $("#e_addc").onclick = () => box.insertAdjacentHTML("beforeend", cuentaHTML());
   $("#d_close").onclick = () => d.close();
-  $("#d_save").onclick = async () => {
-    const { error } = await sb.from("proveedores").update({ estatus: $("#d_st").value, notas_internas: $("#d_nt").value.trim() || null }).eq("id", id);
-    if (error) return $("#d_err").textContent = "No se pudo guardar.";
-    d.close(); load();
+
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const err = $("#d_err"), btn = $("#d_save"); err.textContent = "";
+    if (!v("razon_social") || !v("contacto_nombre") || !v("telefono") || !v("email")) return err.textContent = "Complete los campos marcados con *.";
+    if (v("rif") && !/^[A-Za-z0-9-]{5,20}$/.test(v("rif"))) return err.textContent = "El RIF o la cédula no es válido.";
+    const cats = [...f.querySelectorAll("[name=cat]:checked")].map(c => c.value);
+    if (!cats.length) return err.textContent = "Marque al menos una categoría.";
+    const cuentas = [...box.querySelectorAll(".cuenta")].map(c => { const o = {}; c.querySelectorAll("[data-k]").forEach(i => o[i.dataset.k] = i.value.trim()); return o; }).filter(c => c.numero);
+    const newRif = $("#n_rif").files[0], newBanco = [...$("#n_banco").files];
+    for (const x of [newRif, ...newBanco].filter(Boolean)) { const m = fileErr(x); if (m) return err.textContent = m; }
+    const dels = [...f.querySelectorAll("[data-del]:checked")].map(c => c.dataset.del);
+
+    btn.disabled = true; btn.textContent = "Guardando…";
+    try {
+      const up = async (tag, file, i) => {
+        const ext = (file.name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const path = `${id}/${tag}-${i}-${Date.now()}.${ext}`;
+        const { error } = await sb.storage.from("documentos").upload(path, file, { contentType: file.type });
+        if (error) throw error; return path;
+      };
+      const remove = [...dels];
+      let doc_rif = p.doc_rif;
+      if (newRif) { doc_rif = await up("rif", newRif, 0); if (p.doc_rif) remove.push(p.doc_rif); }
+      else if (dels.includes(p.doc_rif)) doc_rif = null;
+      const docs = (p.docs_bancarios || []).filter(x => !dels.includes(x));
+      for (let i = 0; i < newBanco.length; i++) docs.push(await up("banco", newBanco[i], i));
+
+      const { error } = await sb.from("proveedores").update({
+        razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif: v("rif").toUpperCase() || null,
+        tipo_proveedor: f.tipo_proveedor.value, categorias: cats, descripcion: v("descripcion") || null,
+        contacto_nombre: v("contacto_nombre"), contacto_cargo: v("contacto_cargo") || null, telefono: v("telefono"), email: v("email"),
+        estado: v("estado") || null, ciudad: v("ciudad") || null, direccion: v("direccion") || null,
+        condiciones_pago: v("condiciones_pago") || null, cuentas, doc_rif, docs_bancarios: docs,
+        estatus: f.estatus.value, notas_internas: v("notas_internas") || null
+      }).eq("id", id);
+      if (error) throw error;
+      if (remove.length) await sb.storage.from("documentos").remove([...new Set(remove)]);
+      d.close(); load();
+    } catch (x) {
+      console.error(x); err.textContent = "No se pudo guardar. Revise los datos e intente de nuevo.";
+      btn.disabled = false; btn.textContent = "Guardar cambios";
+    }
   };
   $("#d_del").onclick = async () => {
     if (!confirm(`¿Eliminar a ${p.razon_social} y sus documentos? No se puede deshacer.`)) return;
-    await sb.storage.from("documentos").remove([p.doc_rif, ...(p.docs_bancarios || [])]);
+    const paths = [p.doc_rif, ...(p.docs_bancarios || [])].filter(Boolean);
+    if (paths.length) await sb.storage.from("documentos").remove(paths);
     const { error } = await sb.from("proveedores").delete().eq("id", id);
     if (error) return $("#d_err").textContent = "No se pudo eliminar.";
     d.close(); load();

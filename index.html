@@ -27,7 +27,7 @@
     <legend>Datos de la empresa</legend>
     <label>Razón social *<input type="text" name="razon_social" required maxlength="200"></label>
     <label>Nombre comercial<input type="text" name="nombre_comercial" maxlength="200"></label>
-    <label>RIF *<input type="text" name="rif" required placeholder="J-12345678-9" maxlength="14"></label>
+    <label>RIF o cédula <span class="hint">(si es persona natural y no tiene RIF, puede poner su cédula o dejarlo en blanco)</span><input type="text" name="rif" placeholder="J-12345678-9 o V-12345678" maxlength="14"></label>
     <div class="row">
       <label>Estado<input type="text" name="estado" maxlength="60"></label>
       <label>Ciudad<input type="text" name="ciudad" maxlength="60"></label>
@@ -75,7 +75,7 @@
 
   <fieldset>
     <legend>Documentos</legend>
-    <label>RIF de la empresa * <span class="hint">(PDF o foto, máx. 5 MB)</span>
+    <label>RIF de la empresa <span class="hint">(opcional; las personas naturales pueden subir su cédula o su RIF personal. PDF o foto, máx. 5 MB)</span>
       <input type="file" id="f_rif" accept="application/pdf,image/jpeg,image/png,image/webp"></label>
   </fieldset>
 
@@ -121,8 +121,12 @@ $("#addc").onclick = addCuenta;
 addCuenta();
 
 function normRif(v) {
-  const m = v.toUpperCase().replace(/[\s.]/g, "").match(/^([JGVECP])-?(\d{8})-?(\d)$/);
-  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  v = v.toUpperCase().replace(/[\s.]/g, "");
+  if (!v) return "";
+  let m = v.match(/^([JGVECP])-?(\d{8})-?(\d)$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = v.match(/^([VE])-?(\d{5,9})$/);
+  return m ? `${m[1]}-${m[2]}` : null;
 }
 function checkFile(f) {
   if (!OK_TYPES.includes(f.type)) return `“${f.name}” debe ser PDF o imagen (JPG, PNG, WEBP).`;
@@ -151,25 +155,24 @@ $("#f").addEventListener("submit", async e => {
     const o = {}; c.querySelectorAll("[data-k]").forEach(i => o[i.dataset.k] = i.value.trim()); return o;
   }).filter(c => c.numero);
 
-  const req = ["razon_social","rif","contacto_nombre","telefono","email"];
+  const req = ["razon_social","contacto_nombre","telefono","email"];
 
   if (req.some(n => !v(n))) return err.textContent = "Complete los campos obligatorios marcados con *.";
-  if (!rif) return err.textContent = "El RIF no es válido. Ejemplo: J-12345678-9.";
+  if (rif === null) return err.textContent = "El RIF o la cédula no es válido. Ejemplos: J-12345678-9 o V-12345678.";
   if (!/^\S+@\S+\.\S+$/.test(v("email"))) return err.textContent = "Revise el correo electrónico.";
   if (!cats.length) return err.textContent = "Marque al menos una categoría de lo que comercializa.";
-  if (!rifFile) return err.textContent = "Suba el RIF de la empresa.";
   if (!bancoFiles.length && !cuentas.length) return err.textContent = "Suba el soporte de su cuenta bancaria o llene los datos de la cuenta.";
-  for (const file of [rifFile, ...bancoFiles]) { const m = checkFile(file); if (m) return err.textContent = m; }
+  for (const file of [rifFile, ...bancoFiles].filter(Boolean)) { const m = checkFile(file); if (m) return err.textContent = m; }
 
   btn.disabled = true; btn.textContent = "Enviando…";
   try {
     const id = crypto.randomUUID();
-    const doc_rif = await upload(id, "rif", rifFile, 0);
+    const doc_rif = rifFile ? await upload(id, "rif", rifFile, 0) : null;
     const docs_bancarios = [];
     for (let i = 0; i < bancoFiles.length; i++) docs_bancarios.push(await upload(id, "banco", bancoFiles[i], i));
 
     const { error } = await sb.from("proveedores").insert({
-      id, razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif,
+      id, razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif: rif || null,
       tipo_proveedor: f.tipo_proveedor.value, categorias: cats, descripcion: v("descripcion") || null,
       contacto_nombre: v("contacto_nombre"), contacto_cargo: v("contacto_cargo") || null,
       telefono: v("telefono"), email: v("email"), estado: v("estado") || null, ciudad: v("ciudad") || null,

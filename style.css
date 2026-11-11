@@ -65,3 +65,7 @@ header.brand{display:flex;gap:16px;align-items:center}
 header.brand img{width:84px;height:84px;flex:none}
 @media(max-width:480px){header.brand img{width:64px;height:64px}}
 .notice{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--amber);border-radius:6px;padding:12px 14px;margin:0 0 14px;font-size:.95rem}
+dialog{max-height:92vh;width:min(760px,94vw)}
+dialog fieldset{margin-bottom:10px}
+.docrow{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:4px 0}
+.docrow label{margin:0;font-weight:400;display:flex;gap:6px;white-space:nowrap}
