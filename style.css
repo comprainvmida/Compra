@@ -82,3 +82,21 @@ dialog fieldset{margin-bottom:12px}
 .docrow{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:4px 0}
 .docrow label{margin:0;font-weight:400;display:flex;gap:6px;white-space:nowrap}
 .docs a{color:var(--brand);font-weight:600}
+
+/* marca */
+h1,h2,legend{font-family:"Baloo 2","Figtree",system-ui,sans-serif;letter-spacing:.2px}
+h1{line-height:1.05}
+legend{font-weight:600;line-height:1.2}
+.topbar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.staff-btn{display:inline-flex;align-items:center;gap:8px;background:var(--navy);color:#fff;text-decoration:none;font-weight:700;font-size:.9rem;padding:8px 16px 8px 12px;border-radius:99px;border:2px solid var(--navy)}
+.staff-btn svg{color:var(--yellow);flex:none}
+.staff-btn:hover{background:var(--yellow);border-color:var(--yellow);color:var(--navy)}
+.staff-btn:hover svg{color:var(--navy)}
+header.hero{position:relative;overflow:hidden;padding:26px}
+header.hero::after{content:"";position:absolute;right:-70px;top:-70px;width:230px;height:230px;border-radius:50%;border:30px solid rgba(255,203,5,.22);pointer-events:none}
+header.hero>*{position:relative;z-index:1}
+header.hero h1{font-size:clamp(1.8rem,5vw,2.5rem)}
+.steps{list-style:none;margin:0 0 22px;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.steps li{display:flex;gap:10px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:.88rem;font-weight:600;line-height:1.25}
+.steps b{flex:none;width:30px;height:30px;border-radius:50%;background:var(--yellow);color:var(--navy);display:grid;place-items:center;font-family:"Baloo 2",sans-serif;font-size:1.05rem}
+@media(max-width:600px){.steps{grid-template-columns:1fr}}

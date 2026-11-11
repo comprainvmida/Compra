@@ -7,18 +7,24 @@
 <title>Registro de proveedores · Alimentos Mida</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&family=Baloo+2:wght@600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main class="wrap">
-<header class="top brand">
+<div class="topbar"><a class="staff-btn" href="admin.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Acceso personal</a></div>
+<header class="top brand hero">
   <img src="logo.png" alt="Logo de Quidy" width="84" height="84">
   <div>
     <h1>Registro de proveedores</h1>
     <p class="lead">Complete sus datos para formar parte de la lista de proveedores de <span id="emp"></span>. Toma unos 5 minutos.</p>
   </div>
 </header>
+<ol class="steps">
+  <li><b>1</b><span>Complete los datos de su empresa</span></li>
+  <li><b>2</b><span>Adjunte sus documentos (opcional)</span></li>
+  <li><b>3</b><span>Compras se comunica con usted</span></li>
+</ol>
 
 <form id="f" novalidate>
   <div class="hp" aria-hidden="true"><label>No llenar<input type="text" name="web" tabindex="-1" autocomplete="off"></label></div>
@@ -91,7 +97,6 @@
   <p id="warn" class="notice" hidden>Su registro se guardó, pero algunos documentos no se pudieron subir. Por favor envíelos por WhatsApp o correo.</p>
   <a class="btn-wa" id="wa" href="#" target="_blank" rel="noopener">Escribir por WhatsApp</a>
 </section>
-<footer class="staff"><a href="admin.html">Acceso del personal</a></footer>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
