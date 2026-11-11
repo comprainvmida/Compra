@@ -60,3 +60,8 @@ dl{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:0 0 14px}
 dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
 @media(max-width:560px){dl{grid-template-columns:1fr}dt{margin-top:6px}}
 .docs a{display:block;margin:3px 0;color:var(--green);font-weight:600}
+
+header.brand{display:flex;gap:16px;align-items:center}
+header.brand img{width:84px;height:84px;flex:none}
+@media(max-width:480px){header.brand img{width:64px;height:64px}}
+.notice{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--amber);border-radius:6px;padding:12px 14px;margin:0 0 14px;font-size:.95rem}

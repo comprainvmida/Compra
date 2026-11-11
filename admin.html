@@ -14,7 +14,7 @@
 <main class="wrap wide">
 
 <section id="login" style="max-width:380px;margin:60px auto" hidden>
-  <header class="top"><h1>Panel de compras</h1><p class="lead">Ingrese con su cuenta autorizada.</p></header>
+  <header class="top brand"><img src="logo.png" alt="Logo de Quidy" width="84" height="84"><div><h1>Panel de compras</h1><p class="lead">Ingrese con su cuenta autorizada.</p></div></header>
   <form id="lf">
     <label>Correo<input type="email" id="em" required autocomplete="username"></label>
     <label>Contraseña<input type="password" id="pw" required autocomplete="current-password"></label>
@@ -24,7 +24,7 @@
 </section>
 
 <section id="app" hidden>
-  <header class="top"><h1>Proveedores registrados</h1><p class="lead" id="count"></p></header>
+  <header class="top brand"><img src="logo.png" alt="Logo de Quidy" width="84" height="84"><div><h1>Proveedores registrados</h1><p class="lead" id="count"></p></div></header>
   <div class="bar">
     <input type="search" id="q" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
     <select id="fs" aria-label="Filtrar por estatus">
@@ -109,7 +109,7 @@ async function openDetail(id) {
     <dt>Teléfono</dt><dd><a href="https://wa.me/${esc(p.telefono.replace(/\D/g, "").replace(/^0/, "58"))}" target="_blank" rel="noopener">${esc(p.telefono)}</a></dd>
     <dt>Correo</dt><dd><a href="mailto:${esc(p.email)}">${esc(p.email)}</a></dd>
     <dt>Ubicación</dt><dd>${esc([p.ciudad, p.estado].filter(Boolean).join(", "))} ${esc(p.direccion || "")}</dd>
-    <dt>Factura en</dt><dd>${esc(p.moneda_preferida)} · ${esc(p.condiciones_pago || "sin condiciones indicadas")}</dd>
+    <dt>Condiciones de pago</dt><dd>${esc(p.condiciones_pago || "No indicadas")}</dd>
     <dt>Cuentas</dt><dd>${cuentas}</dd>
     <dt>Documentos</dt><dd class="docs">${link(rif, "RIF")}${link(bancos, "Banco")}</dd>
   </dl>
@@ -135,7 +135,7 @@ async function openDetail(id) {
 }
 
 $("#csv").onclick = () => {
-  const cols = ["created_at","estatus","razon_social","nombre_comercial","rif","tipo_proveedor","categorias","contacto_nombre","contacto_cargo","telefono","email","estado","ciudad","direccion","moneda_preferida","condiciones_pago","notas_internas"];
+  const cols = ["created_at","estatus","razon_social","nombre_comercial","rif","tipo_proveedor","categorias","contacto_nombre","contacto_cargo","telefono","email","estado","ciudad","direccion","condiciones_pago","notas_internas"];
   const cell = v => `"${String(Array.isArray(v) ? v.join("; ") : v ?? "").replace(/"/g, '""')}"`;
   const csv = "\ufeff" + [cols.join(","), ...filtered().map(p => cols.map(c => cell(p[c])).join(","))].join("\r\n");
   const a = document.createElement("a");
