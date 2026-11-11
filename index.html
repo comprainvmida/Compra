@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Registro de proveedores · Alimentos Mida</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap">
+<header class="top">
+  <h1>Registro de proveedores</h1>
+  <p class="lead">Complete sus datos para formar parte de la lista de proveedores de <span id="emp"></span>. Toma unos 5 minutos.</p>
+</header>
+
+<form id="f" novalidate>
+  <div class="hp" aria-hidden="true"><label>No llenar<input type="text" name="web" tabindex="-1" autocomplete="off"></label></div>
+
+  <fieldset>
+    <legend>Datos de la empresa</legend>
+    <label>Razón social *<input type="text" name="razon_social" required maxlength="200"></label>
+    <label>Nombre comercial<input type="text" name="nombre_comercial" maxlength="200"></label>
+    <label>RIF *<input type="text" name="rif" required placeholder="J-12345678-9" maxlength="14"></label>
+    <div class="row">
+      <label>Estado<input type="text" name="estado" maxlength="60"></label>
+      <label>Ciudad<input type="text" name="ciudad" maxlength="60"></label>
+    </div>
+    <label>Dirección fiscal<textarea name="direccion" maxlength="400"></textarea></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Qué comercializa</legend>
+    <div class="radios" role="radiogroup" aria-label="Tipo de proveedor">
+      <label><input type="radio" name="tipo_proveedor" value="productos" checked> Artículos o productos</label>
+      <label><input type="radio" name="tipo_proveedor" value="servicios"> Servicios</label>
+      <label><input type="radio" name="tipo_proveedor" value="ambos"> Ambos</label>
+    </div>
+    <p class="hint" style="margin:0 0 8px">Marque todo lo que aplique *</p>
+    <div class="checks" id="cats"></div>
+    <label>Describa brevemente lo que ofrece<textarea name="descripcion" maxlength="1500" placeholder="Marcas, presentaciones, zonas de cobertura, tiempos de entrega…"></textarea></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Persona de contacto</legend>
+    <div class="row">
+      <label>Nombre y apellido *<input type="text" name="contacto_nombre" required maxlength="120"></label>
+      <label>Cargo<input type="text" name="contacto_cargo" maxlength="120"></label>
+    </div>
+    <div class="row">
+      <label>Teléfono / WhatsApp *<input type="tel" name="telefono" required maxlength="30" placeholder="0412-0000000"></label>
+      <label>Correo electrónico *<input type="email" name="email" required maxlength="150"></label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Condiciones comerciales</legend>
+    <div class="row">
+      <label>Moneda en que factura *
+        <select name="moneda_preferida">
+          <option value="USD">Dólares (USD)</option>
+          <option value="VES">Bolívares (Bs.)</option>
+          <option value="ambas">Ambas</option>
+        </select>
+      </label>
+      <label>Condiciones de pago<input type="text" name="condiciones_pago" maxlength="300" placeholder="Contado, crédito 15 días…"></label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Cuentas bancarias</legend>
+    <p class="hint" style="margin:0 0 12px">Opcional si sube el soporte bancario abajo. Puede agregar cuentas en bolívares y en dólares.</p>
+    <div id="cuentas"></div>
+    <button type="button" id="addc">Agregar cuenta</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Documentos</legend>
+    <label>RIF de la empresa * <span class="hint">(PDF o foto, máx. 5 MB)</span>
+      <input type="file" id="f_rif" accept="application/pdf,image/jpeg,image/png,image/webp"></label>
+    <label>Soporte de cuenta bancaria * <span class="hint">(carátula, certificación o captura; PDF o foto, puede elegir varios)</span>
+      <input type="file" id="f_banco" accept="application/pdf,image/jpeg,image/png,image/webp" multiple></label>
+  </fieldset>
+
+  <div class="err" id="err" role="alert"></div>
+  <button class="primary" id="send" type="submit">Enviar registro</button>
+</form>
+
+<section id="ok" class="done contact" hidden>
+  <h1>Registro recibido</h1>
+  <p>Gracias. Sus datos ya están en la base de proveedores de <span class="emp"></span>. Para continuar el proceso, comuníquese con el departamento de compras:</p>
+  <p><strong>Teléfono / WhatsApp:</strong> <a id="tel" href="#"></a></p>
+  <p><strong>Correo:</strong> <a id="mail" href="#"></a></p>
+  <a class="btn-wa" id="wa" href="#" target="_blank" rel="noopener">Escribir por WhatsApp</a>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+const $ = s => document.querySelector(s);
+const CATS = ["Materias primas e ingredientes","Empaques y embalajes","Insumos de producción","Maquinaria y repuestos","Mantenimiento y reparaciones","Transporte y logística","Limpieza e higiene","Papelería y oficina","Tecnología y software","Servicios profesionales","Seguridad industrial / EPP","Otros"];
+const OK_TYPES = ["application/pdf","image/jpeg","image/png","image/webp"], MAX = 5 * 1024 * 1024;
+
+document.querySelectorAll("#emp,.emp").forEach(e => e.textContent = CFG.EMPRESA);
+$("#cats").innerHTML = CATS.map(c => `<label><input type="checkbox" name="cat" value="${c}"> ${c}</label>`).join("");
+
+function addCuenta() {
+  const d = document.createElement("div");
+  d.className = "cuenta";
+  d.innerHTML = `<div class="row">
+    <label>Banco<input type="text" data-k="banco" maxlength="80"></label>
+    <label>Moneda<select data-k="moneda"><option>Bs.</option><option>USD</option></select></label></div>
+    <div class="row">
+    <label>Tipo<select data-k="tipo"><option>Corriente</option><option>Ahorro</option><option>Otra</option></select></label>
+    <label>Número de cuenta<input type="text" data-k="numero" maxlength="40" inputmode="numeric"></label></div>
+    <label>Titular de la cuenta<input type="text" data-k="titular" maxlength="120"></label>
+    <button type="button" data-rm style="margin-bottom:14px">Quitar</button>`;
+  d.querySelector("[data-rm]").onclick = () => d.remove();
+  $("#cuentas").appendChild(d);
+}
+$("#addc").onclick = addCuenta;
+addCuenta();
+
+function normRif(v) {
+  const m = v.toUpperCase().replace(/[\s.]/g, "").match(/^([JGVECP])-?(\d{8})-?(\d)$/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+function checkFile(f) {
+  if (!OK_TYPES.includes(f.type)) return `“${f.name}” debe ser PDF o imagen (JPG, PNG, WEBP).`;
+  if (f.size > MAX) return `“${f.name}” supera los 5 MB.`;
+  return null;
+}
+async function upload(id, tag, file, i) {
+  const ext = (file.name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const path = `${id}/${tag}-${i}-${Date.now()}.${ext}`;
+  const { error } = await sb.storage.from("documentos").upload(path, file, { contentType: file.type });
+  if (error) throw error;
+  return path;
+}
+
+$("#f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const err = $("#err"), btn = $("#send"), f = e.target;
+  err.textContent = "";
+  if (f.web.value) return;
+  const v = n => f[n].value.trim();
+
+  const rif = normRif(v("rif"));
+  const cats = [...document.querySelectorAll("[name=cat]:checked")].map(c => c.value);
+  const rifFile = $("#f_rif").files[0], bancoFiles = [...$("#f_banco").files];
+  const req = ["razon_social","rif","contacto_nombre","telefono","email"];
+
+  if (req.some(n => !v(n))) return err.textContent = "Complete los campos obligatorios marcados con *.";
+  if (!rif) return err.textContent = "El RIF no es válido. Ejemplo: J-12345678-9.";
+  if (!/^\S+@\S+\.\S+$/.test(v("email"))) return err.textContent = "Revise el correo electrónico.";
+  if (!cats.length) return err.textContent = "Marque al menos una categoría de lo que comercializa.";
+  if (!rifFile) return err.textContent = "Suba el RIF de la empresa.";
+  if (!bancoFiles.length) return err.textContent = "Suba el soporte de su cuenta bancaria.";
+  for (const file of [rifFile, ...bancoFiles]) { const m = checkFile(file); if (m) return err.textContent = m; }
+
+  const cuentas = [...document.querySelectorAll(".cuenta")].map(c => {
+    const o = {}; c.querySelectorAll("[data-k]").forEach(i => o[i.dataset.k] = i.value.trim()); return o;
+  }).filter(c => c.numero);
+
+  btn.disabled = true; btn.textContent = "Enviando…";
+  try {
+    const id = crypto.randomUUID();
+    const doc_rif = await upload(id, "rif", rifFile, 0);
+    const docs_bancarios = [];
+    for (let i = 0; i < bancoFiles.length; i++) docs_bancarios.push(await upload(id, "banco", bancoFiles[i], i));
+
+    const { error } = await sb.from("proveedores").insert({
+      id, razon_social: v("razon_social"), nombre_comercial: v("nombre_comercial") || null, rif,
+      tipo_proveedor: f.tipo_proveedor.value, categorias: cats, descripcion: v("descripcion") || null,
+      contacto_nombre: v("contacto_nombre"), contacto_cargo: v("contacto_cargo") || null,
+      telefono: v("telefono"), email: v("email"), estado: v("estado") || null, ciudad: v("ciudad") || null,
+      direccion: v("direccion") || null, moneda_preferida: f.moneda_preferida.value,
+      condiciones_pago: v("condiciones_pago") || null, cuentas, doc_rif, docs_bancarios
+    });
+    if (error) throw error;
+
+    f.hidden = true;
+    $("#tel").textContent = CFG.TELEFONO_VISIBLE; $("#tel").href = "tel:+" + CFG.WHATSAPP;
+    $("#mail").textContent = CFG.EMAIL; $("#mail").href = "mailto:" + CFG.EMAIL;
+    $("#wa").href = `https://wa.me/${CFG.WHATSAPP}?text=` + encodeURIComponent(`Hola, soy de ${v("razon_social")} y acabo de registrarme como proveedor.`);
+    $("#ok").hidden = false; window.scrollTo(0, 0);
+  } catch (x) {
+    console.error(x);
+    err.textContent = "No se pudo enviar el registro. Revise su conexión e intente de nuevo.";
+    btn.disabled = false; btn.textContent = "Enviar registro";
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Panel de compras · Proveedores</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap wide">
+
+<section id="login" style="max-width:380px;margin:60px auto" hidden>
+  <header class="top"><h1>Panel de compras</h1><p class="lead">Ingrese con su cuenta autorizada.</p></header>
+  <form id="lf">
+    <label>Correo<input type="email" id="em" required autocomplete="username"></label>
+    <label>Contraseña<input type="password" id="pw" required autocomplete="current-password"></label>
+    <div class="err" id="lerr" role="alert"></div>
+    <button class="primary" type="submit">Entrar</button>
+  </form>
+</section>
+
+<section id="app" hidden>
+  <header class="top"><h1>Proveedores registrados</h1><p class="lead" id="count"></p></header>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
+    <select id="fs" aria-label="Filtrar por estatus">
+      <option value="">Todos los estatus</option><option value="nuevo">Nuevo</option><option value="en_revision">En revisión</option>
+      <option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option>
+    </select>
+    <button id="csv">Exportar a Excel (CSV)</button>
+    <button id="out">Salir</button>
+  </div>
+  <div class="tablebox"><table>
+    <thead><tr><th>Empresa</th><th>RIF</th><th>Ofrece</th><th>Contacto</th><th>Registro</th><th>Estatus</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+</section>
+
+<dialog id="dlg"></dialog>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ST = { nuevo:"Nuevo", en_revision:"En revisión", aprobado:"Aprobado", rechazado:"Rechazado" };
+let DATA = [];
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  $("#login").hidden = !!session; $("#app").hidden = !session;
+  if (session) load();
+}
+$("#lf").onsubmit = async e => {
+  e.preventDefault(); $("#lerr").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email: $("#em").value, password: $("#pw").value });
+  if (error) $("#lerr").textContent = "Correo o contraseña incorrectos."; else boot();
+};
+$("#out").onclick = async () => { await sb.auth.signOut(); boot(); };
+
+async function load() {
+  const { data, error } = await sb.from("proveedores").select("*").order("created_at", { ascending: false });
+  if (error) { $("#count").textContent = "No se pudieron cargar los datos."; return; }
+  DATA = data; render();
+}
+function filtered() {
+  const q = $("#q").value.toLowerCase().trim(), s = $("#fs").value;
+  return DATA.filter(p => (!s || p.estatus === s) &&
+    (!q || [p.razon_social, p.nombre_comercial, p.rif, p.contacto_nombre, p.email, (p.categorias || []).join(" ")].join(" ").toLowerCase().includes(q)));
+}
+function render() {
+  const list = filtered();
+  $("#count").textContent = `${list.length} de ${DATA.length} proveedores`;
+  $("#rows").innerHTML = list.length ? list.map(p => `<tr data-id="${p.id}">
+    <td><strong>${esc(p.razon_social)}</strong><br><span class="hint">${esc(p.nombre_comercial || "")}</span></td>
+    <td>${esc(p.rif)}</td>
+    <td>${esc((p.categorias || []).slice(0, 2).join(", "))}${p.categorias?.length > 2 ? ` +${p.categorias.length - 2}` : ""}</td>
+    <td>${esc(p.contacto_nombre)}<br><span class="hint">${esc(p.telefono)}</span></td>
+    <td>${new Date(p.created_at).toLocaleDateString("es-VE")}</td>
+    <td><span class="tag ${p.estatus}">${ST[p.estatus]}</span></td></tr>`).join("")
+    : `<tr><td colspan="6">Aún no hay proveedores que coincidan.</td></tr>`;
+}
+$("#q").oninput = render; $("#fs").onchange = render;
+$("#rows").onclick = e => { const tr = e.target.closest("tr[data-id]"); if (tr) openDetail(tr.dataset.id); };
+
+async function signed(paths) {
+  return Promise.all((paths || []).map(async (p, i) => {
+    const { data } = await sb.storage.from("documentos").createSignedUrl(p, 600);
+    return data ? { url: data.signedUrl, name: p.split("/").pop() } : null;
+  }));
+}
+async function openDetail(id) {
+  const p = DATA.find(x => x.id === id), d = $("#dlg");
+  const rif = await signed([p.doc_rif]), bancos = await signed(p.docs_bancarios);
+  const link = (l, t) => l.filter(Boolean).map(x => `<a href="${x.url}" target="_blank" rel="noopener">${t}: ${esc(x.name)}</a>`).join("");
+  const cuentas = (p.cuentas || []).map(c => `${esc(c.banco)} · ${esc(c.tipo)} · ${esc(c.moneda)} · ${esc(c.numero)} · ${esc(c.titular)}`).join("<br>") || "—";
+  d.innerHTML = `<h2>${esc(p.razon_social)}</h2><p class="hint" style="margin:0 0 14px">${esc(p.nombre_comercial || "")}</p>
+  <dl>
+    <dt>RIF</dt><dd>${esc(p.rif)}</dd>
+    <dt>Ofrece</dt><dd>${esc(p.tipo_proveedor)}: ${esc((p.categorias || []).join(", "))}</dd>
+    <dt>Descripción</dt><dd>${esc(p.descripcion || "—")}</dd>
+    <dt>Contacto</dt><dd>${esc(p.contacto_nombre)} ${p.contacto_cargo ? "(" + esc(p.contacto_cargo) + ")" : ""}</dd>
+    <dt>Teléfono</dt><dd><a href="https://wa.me/${esc(p.telefono.replace(/\D/g, "").replace(/^0/, "58"))}" target="_blank" rel="noopener">${esc(p.telefono)}</a></dd>
+    <dt>Correo</dt><dd><a href="mailto:${esc(p.email)}">${esc(p.email)}</a></dd>
+    <dt>Ubicación</dt><dd>${esc([p.ciudad, p.estado].filter(Boolean).join(", "))} ${esc(p.direccion || "")}</dd>
+    <dt>Factura en</dt><dd>${esc(p.moneda_preferida)} · ${esc(p.condiciones_pago || "sin condiciones indicadas")}</dd>
+    <dt>Cuentas</dt><dd>${cuentas}</dd>
+    <dt>Documentos</dt><dd class="docs">${link(rif, "RIF")}${link(bancos, "Banco")}</dd>
+  </dl>
+  <label>Estatus<select id="d_st">${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${k === p.estatus ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+  <label>Notas internas<textarea id="d_nt">${esc(p.notas_internas || "")}</textarea></label>
+  <div class="err" id="d_err"></div>
+  <div class="bar"><button class="primary" id="d_save">Guardar cambios</button><button id="d_close">Cerrar</button>
+  <button id="d_del" style="margin-left:auto;color:var(--danger);border-color:var(--danger)">Eliminar proveedor</button></div>`;
+  d.showModal();
+  $("#d_close").onclick = () => d.close();
+  $("#d_save").onclick = async () => {
+    const { error } = await sb.from("proveedores").update({ estatus: $("#d_st").value, notas_internas: $("#d_nt").value.trim() || null }).eq("id", id);
+    if (error) return $("#d_err").textContent = "No se pudo guardar.";
+    d.close(); load();
+  };
+  $("#d_del").onclick = async () => {
+    if (!confirm(`¿Eliminar a ${p.razon_social} y sus documentos? No se puede deshacer.`)) return;
+    await sb.storage.from("documentos").remove([p.doc_rif, ...(p.docs_bancarios || [])]);
+    const { error } = await sb.from("proveedores").delete().eq("id", id);
+    if (error) return $("#d_err").textContent = "No se pudo eliminar.";
+    d.close(); load();
+  };
+}
+
+$("#csv").onclick = () => {
+  const cols = ["created_at","estatus","razon_social","nombre_comercial","rif","tipo_proveedor","categorias","contacto_nombre","contacto_cargo","telefono","email","estado","ciudad","direccion","moneda_preferida","condiciones_pago","notas_internas"];
+  const cell = v => `"${String(Array.isArray(v) ? v.join("; ") : v ?? "").replace(/"/g, '""')}"`;
+  const csv = "\ufeff" + [cols.join(","), ...filtered().map(p => cols.map(c => cell(p[c])).join(","))].join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `proveedores-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+};
+boot();
+</script>
+</body>
+</html>
