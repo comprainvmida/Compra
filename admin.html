@@ -84,7 +84,12 @@ $("#out").onclick = async () => { await sb.auth.signOut(); boot(); };
 
 async function load() {
   const { data, error } = await sb.from("proveedores").select("*").order("created_at", { ascending: false });
-  if (error) { $("#count").textContent = "No se pudieron cargar los datos."; return; }
+  if (error) {
+    console.error("Supabase error al cargar proveedores:", error);
+    $("#count").textContent = `No se pudieron cargar los datos: ${error.message}${error.code ? ` (código ${error.code})` : ""}`;
+    return;
+  }
+  if (!data.length) console.warn("Supabase devolvió 0 filas. Si la tabla tiene datos, falta una política RLS de SELECT para el rol 'authenticated'.");
   DATA = data; computeDup();
   const cur = $("#fc").value;
   $("#fc").innerHTML = '<option value="">Todas las categorías</option>' + [...new Set([...CATS, ...DATA.flatMap(p => p.categorias || [])])].map(c => `<option>${esc(c)}</option>`).join("");
@@ -108,7 +113,7 @@ function render() {
     <td>${esc(p.contacto_nombre)}<br><span class="hint">${esc(p.telefono)}</span></td>
     <td>${new Date(p.created_at).toLocaleDateString("es-VE")}</td>
     <td><span class="tag ${p.estatus}">${ST[p.estatus]}</span>${DUP.has(p.id) ? '<br><span class="tag dup">Posible duplicado</span>' : ""}</td></tr>`).join("")
-    : `<tr><td colspan="6">Aún no hay proveedores que coincidan.</td></tr>`;
+    : `<tr><td colspan="6">${DATA.length ? "Ningún proveedor coincide con el filtro." : "Supabase devolvió 0 proveedores. Si en Supabase sí hay datos, la causa casi seguro es la política RLS (falta permiso SELECT para usuarios autenticados)."}</td></tr>`;
 }
 $("#q").oninput = render; $("#fs").onchange = render; $("#fc").onchange = render;
 $("#stats").onclick = e => { const b = e.target.closest("[data-s]"); if (b) { $("#fs").value = b.dataset.s; render(); } };
