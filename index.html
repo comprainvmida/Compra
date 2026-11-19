@@ -26,7 +26,7 @@
   <li><b>3</b><span>Compras se comunica con usted</span></li>
 </ol>
 
-<form id="f" novalidate>
+<form id="f" novalidate autocomplete="off">
   <div class="hp" aria-hidden="true"><label>No llenar<input type="text" name="web" tabindex="-1" autocomplete="off"></label></div>
 
   <fieldset>
@@ -133,6 +133,10 @@ const ready = sb.from("configuracion").select("*").eq("id", 1).maybeSingle()
   .catch(() => {}).finally(applyS);
 $("#cats").innerHTML = CATS.map(c => `<label><input type="checkbox" name="cat" value="${c}"> ${c}</label>`).join("");
 
+// Desactiva el autocompletado del navegador (evita sugerir datos escritos antes en ese equipo)
+const noAuto = root => root.querySelectorAll("input:not([type=radio]):not([type=checkbox]):not([type=file]),textarea,select").forEach(e => e.setAttribute("autocomplete", "off"));
+noAuto(document.getElementById("f"));
+
 function addCuenta() {
   const d = document.createElement("div");
   d.className = "cuenta";
@@ -145,6 +149,7 @@ function addCuenta() {
     <label>Titular de la cuenta<input type="text" data-k="titular" maxlength="120"></label>
     <button type="button" data-rm style="margin-bottom:14px">Quitar</button>`;
   d.querySelector("[data-rm]").onclick = () => d.remove();
+  noAuto(d);
   $("#cuentas").appendChild(d);
 }
 $("#addc").onclick = addCuenta;

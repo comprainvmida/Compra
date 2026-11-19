@@ -28,7 +28,7 @@
   <header class="top brand"><img src="logo.png" alt="Logo de Quidy" width="84" height="84"><div><h1>Proveedores registrados</h1><p class="lead" id="count"></p></div></header>
   <div class="stats" id="stats"></div>
   <div class="bar">
-    <input type="search" id="q" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
+    <input type="search" id="q" autocomplete="off" placeholder="Buscar por nombre, RIF, categoría o contacto" aria-label="Buscar">
     <select id="fs" aria-label="Filtrar por estatus">
       <option value="">Todos los estatus</option><option value="nuevo">Nuevo</option><option value="en_revision">En revisión</option>
       <option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option><option value="dup">Posibles duplicados</option>
@@ -155,7 +155,7 @@ async function openDetail(id) {
   const rifL = p.doc_rif ? await signed([p.doc_rif]) : [], bancoL = await signed(p.docs_bancarios);
   const cats = [...new Set([...CATS, ...(p.categorias || [])])];
   const wa = "https://wa.me/" + p.telefono.replace(/\D/g, "").replace(/^0/, "58");
-  d.innerHTML = `<form id="ef"><h2>${isNew ? "Nuevo proveedor" : "Editar proveedor"}</h2>
+  d.innerHTML = `<form id="ef" autocomplete="off"><h2>${isNew ? "Nuevo proveedor" : "Editar proveedor"}</h2>
   ${DUP.has(p.id) ? `<p class="notice"><strong>Posible duplicado:</strong> ${DUP.get(p.id).map(d => `${esc(d.name)} (mismo ${d.why})`).join("; ")}.</p>` : ""}
   ${isNew ? "" : `<p class="hint" style="margin:0 0 14px">Registrado el ${new Date(p.created_at).toLocaleDateString("es-VE")} ·
     <a href="${wa}" target="_blank" rel="noopener">WhatsApp</a> · <a href="mailto:${esc(p.email)}">Enviar correo</a></p>`}
@@ -260,7 +260,7 @@ $("#cfgb").onclick = async () => {
   if (error) { console.error(error); return alert(`No se pudo leer la configuración: ${error.message}\n\n¿Ya ejecutó supabase-configuracion.sql en Supabase?`); }
   const s = { ...CFG_DEF }; if (data) for (const k in s) if (data[k]) s[k] = data[k];
   const d = $("#dlg");
-  d.innerHTML = `<form id="cf"><h2>Pantalla posterior al registro</h2>
+  d.innerHTML = `<form id="cf" autocomplete="off"><h2>Pantalla posterior al registro</h2>
   <p class="hint" style="margin:0 0 14px">Esto es lo que ve el proveedor al terminar de llenar el formulario. Los cambios se aplican de inmediato.</p>
   <fieldset><legend>Empresa y contacto</legend>
     ${inp("empresa", "Nombre de la empresa", s.empresa)}
