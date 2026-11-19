@@ -35,6 +35,7 @@
     </select>
     <select id="fc" aria-label="Filtrar por categoría"></select>
     <button id="new" class="primary" style="padding:9px 16px">Nuevo proveedor</button>
+    <button id="cfgb">Configuración</button>
     <button id="csv">Exportar a Excel</button>
     <button id="pdf">Exportar a PDF</button>
     <button id="out">Salir</button>
@@ -244,6 +245,54 @@ async function openDetail(id) {
     d.close(); load();
   };
 }
+
+/* ---------- Configuración de la pantalla final ---------- */
+const CFG_DEF = {
+  empresa: CFG.EMPRESA, telefono_visible: CFG.TELEFONO_VISIBLE, whatsapp: CFG.WHATSAPP, email: CFG.EMAIL,
+  titulo_exito: "Registro recibido",
+  mensaje_exito: "Gracias. Sus datos ya están en la base de proveedores de {empresa}. Para continuar el proceso, comuníquese con el departamento de compras:",
+  aviso_docs: "Su registro se guardó, pero algunos documentos no se pudieron subir. Por favor envíelos por WhatsApp o correo.",
+  texto_boton_wa: "Escribir por WhatsApp",
+  mensaje_wa: "Hola, soy de {proveedor} y acabo de registrarme como proveedor."
+};
+$("#cfgb").onclick = async () => {
+  const { data, error } = await sb.from("configuracion").select("*").eq("id", 1).maybeSingle();
+  if (error) { console.error(error); return alert(`No se pudo leer la configuración: ${error.message}\n\n¿Ya ejecutó supabase-configuracion.sql en Supabase?`); }
+  const s = { ...CFG_DEF }; if (data) for (const k in s) if (data[k]) s[k] = data[k];
+  const d = $("#dlg");
+  d.innerHTML = `<form id="cf"><h2>Pantalla posterior al registro</h2>
+  <p class="hint" style="margin:0 0 14px">Esto es lo que ve el proveedor al terminar de llenar el formulario. Los cambios se aplican de inmediato.</p>
+  <fieldset><legend>Empresa y contacto</legend>
+    ${inp("empresa", "Nombre de la empresa", s.empresa)}
+    <div class="row">${inp("telefono_visible", "Teléfono visible (como se muestra)", s.telefono_visible)}${inp("whatsapp", "WhatsApp (solo números, con código de país)", s.whatsapp)}</div>
+    ${inp("email", "Correo de contacto", s.email, "email")}</fieldset>
+  <fieldset><legend>Mensajes</legend>
+    ${inp("titulo_exito", "Título", s.titulo_exito)}
+    ${ta("mensaje_exito", "Mensaje de agradecimiento", s.mensaje_exito)}
+    ${ta("aviso_docs", "Aviso si fallan documentos", s.aviso_docs)}
+    ${inp("texto_boton_wa", "Texto del botón de WhatsApp", s.texto_boton_wa)}
+    ${ta("mensaje_wa", "Mensaje prellenado de WhatsApp", s.mensaje_wa)}
+    <p class="hint">Puede usar <b>{empresa}</b> (su empresa) y, en el mensaje de WhatsApp, <b>{proveedor}</b> (razón social que escribió el proveedor).</p></fieldset>
+  <div class="err" id="c_err" role="alert"></div>
+  <div class="bar"><button class="primary" type="submit" id="c_save">Guardar</button><button type="button" id="c_close">Cerrar</button></div></form>`;
+  d.showModal();
+  const f = $("#cf"), v = n => f[n].value.trim();
+  $("#c_close").onclick = () => d.close();
+  f.onsubmit = async e => {
+    e.preventDefault(); const err = $("#c_err"), btn = $("#c_save"); err.textContent = "";
+    const wa = v("whatsapp").replace(/\D/g, "");
+    if (!v("empresa")) return err.textContent = "Escriba el nombre de la empresa.";
+    if (v("whatsapp") && wa.length < 10) return err.textContent = "El WhatsApp debe tener código de país, por ejemplo 584124438098.";
+    if (v("email") && !/^\S+@\S+\.\S+$/.test(v("email"))) return err.textContent = "Revise el correo electrónico.";
+    const payload = { id: 1, empresa: v("empresa"), telefono_visible: v("telefono_visible") || null, whatsapp: wa || null, email: v("email") || null,
+      titulo_exito: v("titulo_exito") || null, mensaje_exito: v("mensaje_exito") || null, aviso_docs: v("aviso_docs") || null,
+      texto_boton_wa: v("texto_boton_wa") || null, mensaje_wa: v("mensaje_wa") || null };
+    btn.disabled = true; btn.textContent = "Guardando…";
+    const { error } = await sb.from("configuracion").upsert(payload);
+    if (error) { console.error(error); err.textContent = `No se pudo guardar: ${error.message}`; btn.disabled = false; btn.textContent = "Guardar"; return; }
+    CFG.EMPRESA = payload.empresa; d.close();
+  };
+};
 
 $("#csv").onclick = async () => {
   const list = filtered();

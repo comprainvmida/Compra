@@ -90,11 +90,11 @@
 </form>
 
 <section id="ok" class="done contact" hidden>
-  <h1>Registro recibido</h1>
-  <p>Gracias. Sus datos ya están en la base de proveedores de <span class="emp"></span>. Para continuar el proceso, comuníquese con el departamento de compras:</p>
-  <p><strong>Teléfono / WhatsApp:</strong> <a id="tel" href="#"></a></p>
-  <p><strong>Correo:</strong> <a id="mail" href="#"></a></p>
-  <p id="warn" class="notice" hidden>Su registro se guardó, pero algunos documentos no se pudieron subir. Por favor envíelos por WhatsApp o correo.</p>
+  <h1 id="ok_title">Registro recibido</h1>
+  <p id="ok_msg" style="white-space:pre-line">Gracias. Sus datos ya están en la base de proveedores. Para continuar el proceso, comuníquese con el departamento de compras:</p>
+  <p id="p_tel"><strong>Teléfono / WhatsApp:</strong> <a id="tel" href="#"></a></p>
+  <p id="p_mail"><strong>Correo:</strong> <a id="mail" href="#"></a></p>
+  <p id="warn" class="notice" hidden style="white-space:pre-line"></p>
   <a class="btn-wa" id="wa" href="#" target="_blank" rel="noopener">Escribir por WhatsApp</a>
 </section>
 </main>
@@ -107,7 +107,30 @@ const $ = s => document.querySelector(s);
 const CATS = ["Materias primas e ingredientes","Empaques y embalajes","Insumos de producción","Maquinaria y repuestos","Mantenimiento y reparaciones","Transporte y logística","Limpieza e higiene","Papelería y oficina","Tecnología y software","Servicios profesionales","Seguridad industrial / EPP","Otros"];
 const OK_TYPES = ["application/pdf","image/jpeg","image/png","image/webp"], MAX = 5 * 1024 * 1024;
 
-document.querySelectorAll("#emp,.emp").forEach(e => e.textContent = CFG.EMPRESA);
+// Textos de la pantalla final: valores por defecto (config.js) que la tabla "configuracion" de Supabase puede sobrescribir
+const S = {
+  empresa: CFG.EMPRESA, telefono_visible: CFG.TELEFONO_VISIBLE, whatsapp: CFG.WHATSAPP, email: CFG.EMAIL,
+  titulo_exito: "Registro recibido",
+  mensaje_exito: "Gracias. Sus datos ya están en la base de proveedores de {empresa}. Para continuar el proceso, comuníquese con el departamento de compras:",
+  aviso_docs: "Su registro se guardó, pero algunos documentos no se pudieron subir. Por favor envíelos por WhatsApp o correo.",
+  texto_boton_wa: "Escribir por WhatsApp",
+  mensaje_wa: "Hola, soy de {proveedor} y acabo de registrarme como proveedor."
+};
+const fill = (t, o = {}) => String(t).replace(/\{(\w+)\}/g, (m, k) => k === "empresa" ? S.empresa : (o[k] ?? m));
+function applyS() {
+  $("#emp").textContent = S.empresa;
+  $("#ok_title").textContent = S.titulo_exito;
+  $("#ok_msg").textContent = fill(S.mensaje_exito);
+  $("#warn").textContent = S.aviso_docs;
+  $("#wa").textContent = S.texto_boton_wa;
+  $("#tel").textContent = S.telefono_visible; $("#tel").href = "tel:+" + S.whatsapp;
+  $("#mail").textContent = S.email; $("#mail").href = "mailto:" + S.email;
+  $("#p_tel").hidden = !S.telefono_visible; $("#p_mail").hidden = !S.email; $("#wa").hidden = !S.whatsapp;
+}
+applyS();
+const ready = sb.from("configuracion").select("*").eq("id", 1).maybeSingle()
+  .then(({ data }) => { if (data) for (const k in S) if (data[k]) S[k] = data[k]; })
+  .catch(() => {}).finally(applyS);
 $("#cats").innerHTML = CATS.map(c => `<label><input type="checkbox" name="cat" value="${c}"> ${c}</label>`).join("");
 
 function addCuenta() {
@@ -181,7 +204,7 @@ $("#f").addEventListener("submit", async e => {
     });
     if (error) {
       err.textContent = error.code === "23505"
-        ? `Este RIF o cédula ya está registrado en nuestra lista. Si necesita actualizar sus datos, comuníquese con compras: ${CFG.TELEFONO_VISIBLE}.`
+        ? `Este RIF o cédula ya está registrado en nuestra lista. Si necesita actualizar sus datos, comuníquese con compras: ${S.telefono_visible}.`
         : "No se pudo enviar el registro. Revise sus datos e intente de nuevo.";
       return reset();
     }
@@ -191,10 +214,9 @@ $("#f").addEventListener("submit", async e => {
       const { error: e2 } = await sb.storage.from("documentos").upload(p, file, { contentType: file.type });
       if (e2) fallo = true;
     }
+    await ready; applyS();
     f.hidden = true; $("#warn").hidden = !fallo;
-    $("#tel").textContent = CFG.TELEFONO_VISIBLE; $("#tel").href = "tel:+" + CFG.WHATSAPP;
-    $("#mail").textContent = CFG.EMAIL; $("#mail").href = "mailto:" + CFG.EMAIL;
-    $("#wa").href = `https://wa.me/${CFG.WHATSAPP}?text=` + encodeURIComponent(`Hola, soy de ${v("razon_social")} y acabo de registrarme como proveedor.`);
+    $("#wa").href = `https://wa.me/${S.whatsapp}?text=` + encodeURIComponent(fill(S.mensaje_wa, { proveedor: v("razon_social") }));
     $("#ok").hidden = false; window.scrollTo(0, 0);
   } catch (x) {
     console.error(x);
