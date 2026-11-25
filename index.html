@@ -100,9 +100,19 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="config.js"></script>
+<script src="./config.js" charset="utf-8"></script>
 <script>
-const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+window.CFG = window.CFG || {
+  SUPABASE_URL: "https://exjgdiqmjgfvhyltgxra.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4amdkaXFtamdmdmh5bHRneHJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQzNzEzMTQsImV4cCI6MjEwOTk0NzMxNH0.b51BIOXvtxHY34ufiBwA9AoEHqyz3a4Eb25NBokohbU",
+  EMPRESA: "Alimentos Mida",
+  TELEFONO_VISIBLE: "0412-4438098",
+  WHATSAPP: "584124438098",
+  EMAIL: "jhernandez@alimentosmida.com"
+};
+</script>
+<script>
+const sb = supabase.createClient(window.CFG.SUPABASE_URL, window.CFG.SUPABASE_ANON_KEY);
 const $ = s => document.querySelector(s);
 const CATS = ["Materias primas e ingredientes","Empaques y embalajes","Insumos de producción","Maquinaria y repuestos","Mantenimiento y reparaciones","Transporte y logística","Limpieza e higiene","Papelería y oficina","Tecnología y software","Servicios profesionales","Seguridad industrial / EPP","Otros"];
 const OK_TYPES = ["application/pdf","image/jpeg","image/png","image/webp"], MAX = 5 * 1024 * 1024;

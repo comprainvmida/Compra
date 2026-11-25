@@ -3,7 +3,7 @@
  * Integrado con Supabase Auth + Postgres + Proveedores Aprobados
  * ============================================================================ */
 
-const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+const sb = supabase.createClient(window.CFG.SUPABASE_URL, window.CFG.SUPABASE_ANON_KEY);
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
