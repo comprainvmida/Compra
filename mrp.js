@@ -243,7 +243,7 @@ function computeMrp() {
   const rows = [];
   let totalInvUsd = 0, totalMpUsd = 0, totalMeUsd = 0, deficitCount = 0, noCostCount = 0;
   const weeklyUsd = [0, 0, 0, 0, 0];
-  const catInv = new Map(); // cat -> { mp: 0, me: 0 }
+  const catInv = new Map();
 
   for (const [code, m] of STATE.materials.entries()) {
     const c = consumption.get(code) || { total: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, byCat: new Map() };
@@ -287,6 +287,15 @@ function computeMrp() {
   }
 
   return { rows, totalCases, totalInvUsd, totalMpUsd, totalMeUsd, deficitCount, noCostCount, weeklyUsd, catInv, catCases };
+}
+
+function getFilteredAnalisisRows(mrp) {
+  const q = STATE.fAnalisis.q.toLowerCase().trim();
+  return mrp.rows.filter(r =>
+    (!STATE.fAnalisis.type || r.m.type === STATE.fAnalisis.type) &&
+    (!STATE.fAnalisis.onlyActive || r.c.total > 0 || r.hasDeficit || r.decision > 0) &&
+    (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
+  );
 }
 
 function skuCostBreakdown(skuCode) {
@@ -424,15 +433,9 @@ function renderDashboard(v) {
   });
 }
 
-// -------------------- 2. PLAN DE PRODUCCIÓN --------------------
+// -------------------- 2. PLAN DE PRODUCCIÓN (SIN PÉRDIDA DE FOCO) --------------------
 function renderPlan(v) {
   const cats = [...new Set([...STATE.skus.values()].map(s => s.category))].sort();
-  const q = STATE.fPlan.q.toLowerCase();
-  const list = [...STATE.skus.values()].filter(s =>
-    (!STATE.fPlan.cat || s.category === STATE.fPlan.cat) &&
-    (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q))
-  );
-
   v.innerHTML = `
     <div class="bar">
       <input type="search" id="fp_q" placeholder="Buscar SKU o código…" value="${esc(STATE.fPlan.q)}">
@@ -446,55 +449,64 @@ function renderPlan(v) {
         <th class="num">Sem 1</th><th class="num">Sem 2</th><th class="num">Sem 3</th><th class="num">Sem 4</th><th class="num">Sem 5</th>
         <th>Check</th><th></th>
       </tr></thead>
-      <tbody>
-        ${list.map(s => {
-          const pi = getPlanItem(s.code);
-          const sumW = num(pi.w1) + num(pi.w2) + num(pi.w3) + num(pi.w4) + num(pi.w5);
-          const ok = Math.abs(sumW - num(pi.plan_qty)) < 0.01;
-          return `<tr data-sku="${esc(s.code)}">
-            <td><code>${esc(s.code)}</code></td>
-            <td><strong>${esc(s.name)}</strong><div class="hint">${fmt(s.net_weight_per_case, 2)} kg/cj · Lote ${fmt(s.batch_size_cases, 1)} cj</div></td>
-            <td>${esc(s.category)}</td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="forecast" value="${num(pi.forecast)}"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="plan_qty" value="${num(pi.plan_qty)}" style="border-color:var(--brand)"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w1" value="${num(pi.w1)}"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w2" value="${num(pi.w2)}"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w3" value="${num(pi.w3)}"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w4" value="${num(pi.w4)}"></td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w5" value="${num(pi.w5)}"></td>
-            <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
-            <td><button class="btn-sm" data-pror="${esc(s.code)}" title="Dividir Plan Mes entre 4 semanas">÷4</button></td>
-          </tr>`;
-        }).join("") || `<tr><td colspan="12" class="hint" style="text-align:center;padding:20px">No hay SKUs que coincidan.</td></tr>`}
-      </tbody>
+      <tbody id="fp_body"></tbody>
     </table></div>`;
 
-  $("#fp_q").oninput = e => { STATE.fPlan.q = e.target.value; renderPlan(v); };
-  $("#fp_cat").onchange = e => { STATE.fPlan.cat = e.target.value; renderPlan(v); };
+  const paintRows = () => {
+    const q = STATE.fPlan.q.toLowerCase().trim();
+    const list = [...STATE.skus.values()].filter(s =>
+      (!STATE.fPlan.cat || s.category === STATE.fPlan.cat) &&
+      (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q))
+    );
+    const tb = $("#fp_body");
+    tb.innerHTML = list.map(s => {
+      const pi = getPlanItem(s.code);
+      const sumW = num(pi.w1) + num(pi.w2) + num(pi.w3) + num(pi.w4) + num(pi.w5);
+      const ok = Math.abs(sumW - num(pi.plan_qty)) < 0.01;
+      return `<tr data-sku="${esc(s.code)}">
+        <td><code>${esc(s.code)}</code></td>
+        <td><strong>${esc(s.name)}</strong><div class="hint">${fmt(s.net_weight_per_case, 2)} kg/cj · Lote ${fmt(s.batch_size_cases, 1)} cj</div></td>
+        <td>${esc(s.category)}</td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="forecast" value="${num(pi.forecast)}"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="plan_qty" value="${num(pi.plan_qty)}" style="border-color:var(--brand)"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w1" value="${num(pi.w1)}"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w2" value="${num(pi.w2)}"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w3" value="${num(pi.w3)}"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w4" value="${num(pi.w4)}"></td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w5" value="${num(pi.w5)}"></td>
+        <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
+        <td><button class="btn-sm" data-pror="${esc(s.code)}" title="Dividir Plan Mes entre 4 semanas">÷4</button></td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="12" class="hint" style="text-align:center;padding:20px">No hay SKUs que coincidan.</td></tr>`;
 
-  v.querySelectorAll("input[data-f]").forEach(inp => {
-    inp.onchange = () => {
-      const skuCode = inp.closest("tr").dataset.sku;
-      const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
-      cur[inp.dataset.f] = Math.max(0, num(inp.value));
-      STATE.planItems.set(skuCode, cur);
-      savePlanItem(cur);
-      renderPlan(v);
-    };
-  });
+    tb.querySelectorAll("input[data-f]").forEach(inp => {
+      inp.onchange = () => {
+        const skuCode = inp.closest("tr").dataset.sku;
+        const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
+        cur[inp.dataset.f] = Math.max(0, num(inp.value));
+        STATE.planItems.set(skuCode, cur);
+        savePlanItem(cur);
+        paintRows();
+      };
+    });
 
-  v.querySelectorAll("[data-pror]").forEach(btn => {
-    btn.onclick = () => {
-      const skuCode = btn.dataset.pror;
-      const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
-      const q4 = Math.round((num(cur.plan_qty) / 4) * 100) / 100;
-      const rem = Math.round((num(cur.plan_qty) - q4 * 3) * 100) / 100;
-      cur.w1 = q4; cur.w2 = q4; cur.w3 = q4; cur.w4 = Math.max(0, rem); cur.w5 = 0;
-      STATE.planItems.set(skuCode, cur);
-      savePlanItem(cur);
-      renderPlan(v);
-    };
-  });
+    tb.querySelectorAll("[data-pror]").forEach(btn => {
+      btn.onclick = () => {
+        const skuCode = btn.dataset.pror;
+        const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
+        const q4 = Math.round((num(cur.plan_qty) / 4) * 100) / 100;
+        const rem = Math.round((num(cur.plan_qty) - q4 * 3) * 100) / 100;
+        cur.w1 = q4; cur.w2 = q4; cur.w3 = q4; cur.w4 = Math.max(0, rem); cur.w5 = 0;
+        STATE.planItems.set(skuCode, cur);
+        savePlanItem(cur);
+        paintRows();
+      };
+    });
+  };
+
+  paintRows();
+  $("#fp_q").oninput = e => { STATE.fPlan.q = e.target.value; paintRows(); };
+  $("#fp_cat").onchange = e => { STATE.fPlan.cat = e.target.value; paintRows(); };
 
   $("#btn_prorratear_all").onclick = async () => {
     const updates = [];
@@ -513,7 +525,7 @@ function renderPlan(v) {
       await batchUpsert("mrp_plan_items", updates, "plan_id,sku_code");
       setSync("ok");
       toast(`Prorrateados ${updates.length} SKUs en 4 semanas.`);
-      renderPlan(v);
+      paintRows();
     } catch (e) { setSync("err"); toast(e.message, true); }
   };
 }
@@ -530,16 +542,8 @@ function savePlanItem(it) {
   });
 }
 
-// -------------------- 3. ANÁLISIS MRP (ESENCIAL + AVANZADO OPCIONAL) --------------------
+// -------------------- 3. ANÁLISIS MRP (SIN PÉRDIDA DE FOCO + REPORTES BONITOS) --------------------
 function renderAnalisis(v) {
-  const mrp = computeMrp();
-  const q = STATE.fAnalisis.q.toLowerCase();
-  const rows = mrp.rows.filter(r =>
-    (!STATE.fAnalisis.type || r.m.type === STATE.fAnalisis.type) &&
-    (!STATE.fAnalisis.onlyActive || r.c.total > 0 || r.hasDeficit || r.decision > 0) &&
-    (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
-  );
-
   v.innerHTML = `
     <div class="bar">
       <input type="search" id="fa_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fAnalisis.q)}">
@@ -551,8 +555,10 @@ function renderAnalisis(v) {
       <label class="toggle-lbl"><input type="checkbox" id="fa_act" ${STATE.fAnalisis.onlyActive ? "checked" : ""}> Solo con consumo o déficit</label>
       <label class="toggle-lbl"><input type="checkbox" id="fa_adv" ${STATE.fAnalisis.showAdv ? "checked" : ""}> Mostrar columnas avanzadas</label>
       <button id="btn_copy_prop" class="primary" style="padding:8px 14px;font-size:.86rem">Aplicar Propuesta Sugerida</button>
+      <button id="btn_rep_xlsx" style="padding:8px 12px;font-size:.86rem" title="Descargar solo este análisis MRP con diseño ejecutivo">Reporte Compra (Excel)</button>
+      <button id="btn_rep_pdf" style="padding:8px 12px;font-size:.86rem" title="Descargar reporte de compra en PDF con membrete">Reporte Compra (PDF)</button>
     </div>
-    <div class="tablebox ${STATE.fAnalisis.showAdv ? "show-adv" : ""}"><table class="mrp-table">
+    <div id="fa_tblbox" class="tablebox ${STATE.fAnalisis.showAdv ? "show-adv" : ""}"><table class="mrp-table">
       <thead><tr>
         <th>Insumo</th>
         <th class="adv-col num">Lead (d)</th>
@@ -572,69 +578,85 @@ function renderAnalisis(v) {
         <th class="num">Inversión USD</th>
         <th>Estado</th>
       </tr></thead>
-      <tbody>
-        ${rows.map(r => {
-          const badge = r.noCost
-            ? `<span class="badge nocost">SIN COSTO</span>`
-            : r.hasDeficit
-              ? `<span class="badge deficit">DÉFICIT</span>`
-              : `<span class="badge ok">OK</span>`;
-          return `<tr data-mat="${esc(r.m.code)}">
-            <td><strong>${esc(r.m.name)}</strong><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)} · <span class="badge ${r.m.type === "MP" ? "mp" : "me"}">${r.m.type}</span></div></td>
-            <td class="adv-col num">${num(r.m.lead_time)}</td>
-            <td class="adv-col num">${fmt(r.m.moq, 0)}</td>
-            <td class="adv-col num">${fmt(r.m.rounding, 0)}</td>
-            <td class="adv-col num">${fmt(num(r.m.safety_pct) * 100, 0)}%</td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-stock value="${r.stock}"></td>
-            <td class="num">${fmt(r.c.total)}</td>
-            <td class="adv-col num">${fmt(r.covInit * 100, 0)}%</td>
-            <td class="num" style="color:${r.diff < 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${fmt(r.diff)}</td>
-            <td class="num" style="font-weight:700;color:var(--brand)">${fmt(r.suggested)}</td>
-            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-dec value="${r.decision}" style="border-color:var(--brand)"></td>
-            <td class="adv-col"><input class="cell-inp wide" type="text" list="dl_proveedores" placeholder="Seleccionar…" data-prov value="${esc(r.comp.provider || "")}"></td>
-            <td class="adv-col"><input class="cell-inp" type="text" style="text-align:left;width:90px" placeholder="OC-" data-oc value="${esc(r.comp.oc || "")}"></td>
-            <td class="adv-col num" style="color:${r.stockFinal < 0 ? "var(--danger)" : "inherit"}">${fmt(r.stockFinal)}</td>
-            <td class="adv-col num">${fmt(r.covFinal * 100, 0)}%</td>
-            <td class="num" title="Costo unitario: ${fmtUsd(r.cost)} (editar en pestaña Costos)"><strong>${fmtUsd(r.invUsd)}</strong></td>
-            <td>${badge}</td>
-          </tr>`;
-        }).join("") || `<tr><td colspan="17" class="hint" style="text-align:center;padding:22px">Sin insumos activos. Cargue cantidades en <strong>Plan de Producción</strong> o desactive el filtro.</td></tr>`}
-      </tbody>
+      <tbody id="fa_body"></tbody>
     </table></div>
-    <p class="hint" style="margin-top:8px">Mostrando ${rows.length} insumos · Inversión total del plan: <strong>${fmtUsd(mrp.totalInvUsd)}</strong>. Los costos unitarios se gestionan únicamente en la pestaña <strong>Costos de Compra</strong>.</p>`;
+    <p id="fa_foot" class="hint" style="margin-top:8px"></p>`;
 
-  $("#fa_q").oninput = e => { STATE.fAnalisis.q = e.target.value; renderAnalisis(v); };
-  $("#fa_type").onchange = e => { STATE.fAnalisis.type = e.target.value; renderAnalisis(v); };
-  $("#fa_act").onchange = e => { STATE.fAnalisis.onlyActive = e.target.checked; renderAnalisis(v); };
-  $("#fa_adv").onchange = e => { STATE.fAnalisis.showAdv = e.target.checked; renderAnalisis(v); };
+  const paintRows = () => {
+    const mrp = computeMrp();
+    const rows = getFilteredAnalisisRows(mrp);
+    $("#fa_tblbox").classList.toggle("show-adv", STATE.fAnalisis.showAdv);
+    const tb = $("#fa_body");
+    tb.innerHTML = rows.map(r => {
+      const badge = r.noCost
+        ? `<span class="badge nocost">SIN COSTO</span>`
+        : r.hasDeficit
+          ? `<span class="badge deficit">DÉFICIT</span>`
+          : `<span class="badge ok">OK</span>`;
+      return `<tr data-mat="${esc(r.m.code)}">
+        <td><strong>${esc(r.m.name)}</strong><button class="icon-edit" data-editmat="${esc(r.m.code)}" title="Editar insumo">✎</button><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)} · <span class="badge ${r.m.type === "MP" ? "mp" : "me"}">${r.m.type}</span></div></td>
+        <td class="adv-col num">${num(r.m.lead_time)}</td>
+        <td class="adv-col num">${fmt(r.m.moq, 0)}</td>
+        <td class="adv-col num">${fmt(r.m.rounding, 0)}</td>
+        <td class="adv-col num">${fmt(num(r.m.safety_pct) * 100, 0)}%</td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-stock value="${r.stock}"></td>
+        <td class="num">${fmt(r.c.total)}</td>
+        <td class="adv-col num">${fmt(r.covInit * 100, 0)}%</td>
+        <td class="num" style="color:${r.diff < 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${fmt(r.diff)}</td>
+        <td class="num" style="font-weight:700;color:var(--brand)">${fmt(r.suggested)}</td>
+        <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-dec value="${r.decision}" style="border-color:var(--brand)"></td>
+        <td class="adv-col"><input class="cell-inp wide" type="text" list="dl_proveedores" placeholder="Seleccionar…" data-prov value="${esc(r.comp.provider || "")}"></td>
+        <td class="adv-col"><input class="cell-inp" type="text" style="text-align:left;width:90px" placeholder="OC-" data-oc value="${esc(r.comp.oc || "")}"></td>
+        <td class="adv-col num" style="color:${r.stockFinal < 0 ? "var(--danger)" : "inherit"}">${fmt(r.stockFinal)}</td>
+        <td class="adv-col num">${fmt(r.covFinal * 100, 0)}%</td>
+        <td class="num" title="Costo unitario: ${fmtUsd(r.cost)} (editar en pestaña Costos)"><strong>${fmtUsd(r.invUsd)}</strong></td>
+        <td>${badge}</td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="17" class="hint" style="text-align:center;padding:22px">Sin insumos activos. Cargue cantidades en <strong>Plan de Producción</strong> o desactive el filtro.</td></tr>`;
 
-  v.querySelectorAll("input[data-stock]").forEach(inp => {
-    inp.onchange = () => {
-      const code = inp.closest("tr").dataset.mat;
-      const m = STATE.materials.get(code);
-      m.stock = Math.max(0, num(inp.value));
-      debounceSave("st_" + code, async () => {
-        const { error } = await sb.from("mrp_materiales").update({ stock: m.stock, updated_at: new Date().toISOString() }).eq("code", code);
-        if (error) throw error;
-      });
-      renderAnalisis(v);
+    const viewInv = rows.reduce((acc, r) => acc + r.invUsd, 0);
+    $("#fa_foot").innerHTML = `Mostrando <strong>${rows.length}</strong> insumos · Inversión en vista: <strong>${fmtUsd(viewInv)}</strong> (Total plan: <strong>${fmtUsd(mrp.totalInvUsd)}</strong>). Los costos unitarios se gestionan en <strong>Costos de Compra</strong>.`;
+
+    tb.querySelectorAll("[data-editmat]").forEach(btn => {
+      btn.onclick = () => openEditMaterialModal(btn.dataset.editmat, paintRows);
+    });
+
+    tb.querySelectorAll("input[data-stock]").forEach(inp => {
+      inp.onchange = () => {
+        const code = inp.closest("tr").dataset.mat;
+        const m = STATE.materials.get(code);
+        m.stock = Math.max(0, num(inp.value));
+        debounceSave("st_" + code, async () => {
+          const { error } = await sb.from("mrp_materiales").update({ stock: m.stock, updated_at: new Date().toISOString() }).eq("code", code);
+          if (error) throw error;
+        });
+        paintRows();
+      };
+    });
+
+    const onCompraEdit = (tr, field, val) => {
+      const code = tr.dataset.mat;
+      const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
+      cur[field] = val;
+      STATE.compras.set(code, cur);
+      saveCompra(cur);
+      if (field === "decision_qty") paintRows();
     };
-  });
 
-  const onCompraEdit = (tr, field, val) => {
-    const code = tr.dataset.mat;
-    const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
-    cur[field] = val;
-    STATE.compras.set(code, cur);
-    saveCompra(cur);
-    if (field === "decision_qty") renderAnalisis(v);
+    tb.querySelectorAll("input[data-dec]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "decision_qty", Math.max(0, num(inp.value))));
+    tb.querySelectorAll("input[data-prov]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "provider", inp.value.trim()));
+    tb.querySelectorAll("input[data-oc]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "oc", inp.value.trim()));
   };
 
-  v.querySelectorAll("input[data-dec]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "decision_qty", Math.max(0, num(inp.value))));
-  v.querySelectorAll("input[data-prov]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "provider", inp.value.trim()));
-  v.querySelectorAll("input[data-oc]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "oc", inp.value.trim()));
+  paintRows();
+  $("#fa_q").oninput = e => { STATE.fAnalisis.q = e.target.value; paintRows(); };
+  $("#fa_type").onchange = e => { STATE.fAnalisis.type = e.target.value; paintRows(); };
+  $("#fa_act").onchange = e => { STATE.fAnalisis.onlyActive = e.target.checked; paintRows(); };
+  $("#fa_adv").onchange = e => { STATE.fAnalisis.showAdv = e.target.checked; paintRows(); };
 
   $("#btn_copy_prop").onclick = async () => {
+    const mrp = computeMrp();
+    const rows = getFilteredAnalisisRows(mrp);
     const updates = [];
     for (const r of rows) {
       if (r.suggested <= 0) continue;
@@ -652,9 +674,12 @@ function renderAnalisis(v) {
       await batchUpsert("mrp_compras", updates, "plan_id,mat_code");
       setSync("ok");
       toast(`Propuesta aplicada a ${updates.length} insumos.`);
-      renderAnalisis(v);
+      paintRows();
     } catch (e) { setSync("err"); toast(e.message, true); }
   };
+
+  $("#btn_rep_xlsx").onclick = () => exportAnalisisReportExcel();
+  $("#btn_rep_pdf").onclick = () => exportAnalisisReportPdf();
 }
 
 function saveCompra(c) {
@@ -670,19 +695,307 @@ function saveCompra(c) {
   });
 }
 
-// -------------------- 4. PROCURA SEMANAL (S1–S5) --------------------
-function renderProcura(v) {
+// -------------------- REPORTES BONITOS DE ANÁLISIS MRP (EXCEL Y PDF) --------------------
+async function exportAnalisisReportExcel() {
   const mrp = computeMrp();
-  const q = STATE.fProcura.q.toLowerCase();
-  const rows = mrp.rows.filter(r =>
-    (!STATE.fProcura.onlyActive || r.decision > 0 || r.c.total > 0) &&
-    (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
-  );
+  const rows = getFilteredAnalisisRows(mrp);
+  if (!rows.length) return toast("No hay insumos en la vista actual para exportar.", true);
+  if (typeof ExcelJS === "undefined") return toast("ExcelJS no cargó. Recargue la página.", true);
 
+  const btn = $("#btn_rep_xlsx");
+  btn.disabled = true; btn.textContent = "Generando…";
+  try {
+    const planName = STATE.planes.find(p => p.id === STATE.activePlanId)?.name || "Planificación MRP";
+    const showAdv = STATE.fAnalisis.showAdv;
+    const wb = new ExcelJS.Workbook();
+    wb.creator = window.CFG.EMPRESA || "Alimentos Mida";
+    wb.created = new Date();
+
+    const ws = wb.addWorksheet("Planificación de Compra", { views: [{ state: "frozen", ySplit: 6 }] });
+
+    const cols = showAdv ? [
+      { header: "Código", key: "code", width: 13 },
+      { header: "Insumo", key: "name", width: 34 },
+      { header: "UM", key: "um", width: 8 },
+      { header: "Tipo", key: "type", width: 8 },
+      { header: "Lead (d)", key: "lt", width: 10 },
+      { header: "MOQ", key: "moq", width: 11 },
+      { header: "Red.", key: "red", width: 9 },
+      { header: "% SS", key: "ss", width: 9 },
+      { header: "Stock Disp.", key: "stock", width: 14 },
+      { header: "Consumo", key: "cons", width: 14 },
+      { header: "Cob. Ini", key: "cobi", width: 11 },
+      { header: "Diferencia", key: "diff", width: 14 },
+      { header: "Propuesta", key: "prop", width: 14 },
+      { header: "Decisión Compra", key: "dec", width: 16 },
+      { header: "Proveedor", key: "prov", width: 24 },
+      { header: "N° O/C", key: "oc", width: 13 },
+      { header: "Stock Final", key: "sfin", width: 14 },
+      { header: "Cob. Fin", key: "cobf", width: 11 },
+      { header: "Costo Unit.", key: "cost", width: 13 },
+      { header: "Inversión USD", key: "inv", width: 16 },
+      { header: "Estado", key: "est", width: 13 }
+    ] : [
+      { header: "Código", key: "code", width: 13 },
+      { header: "Insumo", key: "name", width: 36 },
+      { header: "UM", key: "um", width: 8 },
+      { header: "Tipo", key: "type", width: 8 },
+      { header: "Stock Disp.", key: "stock", width: 14 },
+      { header: "Consumo", key: "cons", width: 14 },
+      { header: "Diferencia", key: "diff", width: 14 },
+      { header: "Propuesta", key: "prop", width: 14 },
+      { header: "Decisión Compra", key: "dec", width: 16 },
+      { header: "Costo Unit.", key: "cost", width: 13 },
+      { header: "Inversión USD", key: "inv", width: 16 },
+      { header: "Estado", key: "est", width: 13 }
+    ];
+
+    ws.columns = cols.map(c => ({ key: c.key, width: c.width }));
+    const colCount = cols.length;
+    const lastColLetter = ws.getColumn(colCount).letter;
+
+    // Row 1: Corporate Banner
+    ws.mergeCells(`A1:${lastColLetter}1`);
+    const r1 = ws.getRow(1);
+    r1.height = 30;
+    r1.getCell(1).value = `${(window.CFG.EMPRESA || "ALIMENTOS MIDA").toUpperCase()} · REPORTE DE PLANIFICACIÓN DE COMPRA (MRP)`;
+    r1.getCell(1).font = { name: "Calibri", size: 15, bold: true, color: { argb: "FFFFFFFF" } };
+    r1.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF011487" } };
+    r1.getCell(1).alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+
+    // Row 2: Subtitle with yellow bottom accent
+    ws.mergeCells(`A2:${lastColLetter}2`);
+    const r2 = ws.getRow(2);
+    r2.height = 20;
+    const filtros = [
+      STATE.fAnalisis.type ? `Tipo: ${STATE.fAnalisis.type}` : "MP y ME",
+      STATE.fAnalisis.onlyActive ? "Solo con consumo/déficit" : "Todos los insumos",
+      showAdv ? "Vista Completa" : "Vista Esencial"
+    ].join("  |  ");
+    r2.getCell(1).value = `Plan: ${planName}   ·   Fecha: ${new Date().toLocaleDateString("es-VE")}   ·   ${filtros}`;
+    r2.getCell(1).font = { name: "Calibri", size: 10, italic: true, color: { argb: "FFE8ECFF" } };
+    r2.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF000E5E" } };
+    r2.getCell(1).alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+    r2.getCell(1).border = { bottom: { style: "thick", color: { argb: "FFFFCB05" } } };
+
+    // Row 3-4: KPI Summary Strip
+    const totInv = rows.reduce((s, r) => s + r.invUsd, 0);
+    const totMp = rows.filter(r => r.m.type === "MP").reduce((s, r) => s + r.invUsd, 0);
+    const totMe = rows.filter(r => r.m.type === "ME").reduce((s, r) => s + r.invUsd, 0);
+    const defCnt = rows.filter(r => r.hasDeficit).length;
+
+    ws.getRow(3).height = 8;
+    ws.mergeCells(`A4:${lastColLetter}4`);
+    const r4 = ws.getRow(4);
+    r4.height = 24;
+    r4.getCell(1).value = `RESUMEN:   Inversión Total: ${fmtUsd(totInv)}   |   Materia Prima (MP): ${fmtUsd(totMp)}   |   Material Empaque (ME): ${fmtUsd(totMe)}   |   Insumos: ${rows.length}   |   En Déficit: ${defCnt}`;
+    r4.getCell(1).font = { name: "Calibri", size: 10.5, bold: true, color: { argb: "FF011487" } };
+    r4.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEF1FA" } };
+    r4.getCell(1).alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+    r4.getCell(1).border = {
+      top: { style: "thin", color: { argb: "FFD3D9EE" } },
+      bottom: { style: "thin", color: { argb: "FFD3D9EE" } }
+    };
+    ws.getRow(5).height = 8;
+
+    // Row 6: Table Header
+    const hRow = ws.getRow(6);
+    hRow.height = 26;
+    cols.forEach((c, idx) => {
+      const cell = hRow.getCell(idx + 1);
+      cell.value = c.header;
+      cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF011487" } };
+      cell.alignment = { vertical: "middle", horizontal: ["code", "name", "um", "type", "prov", "oc", "est"].includes(c.key) ? "left" : "right", wrapText: true };
+      cell.border = { bottom: { style: "medium", color: { argb: "FFFFCB05" } } };
+    });
+
+    // Data rows starting at Row 7
+    rows.forEach((r, idx) => {
+      const estado = r.noCost ? "SIN COSTO" : r.hasDeficit ? "DÉFICIT" : "OK";
+      const obj = {
+        code: r.m.code, name: r.m.name, um: r.m.um, type: r.m.type,
+        lt: num(r.m.lead_time), moq: num(r.m.moq), red: num(r.m.rounding), ss: num(r.m.safety_pct),
+        stock: r.stock, cons: r.c.total, cobi: r.covInit, diff: r.diff,
+        prop: r.suggested, dec: r.decision, prov: r.comp.provider || "", oc: r.comp.oc || "",
+        sfin: r.stockFinal, cobf: r.covFinal, cost: r.cost, inv: r.invUsd, est: estado
+      };
+      const row = ws.addRow(obj);
+      row.height = 20;
+      const isZebra = idx % 2 === 1;
+      row.eachCell((cell, colNumber) => {
+        const key = cols[colNumber - 1].key;
+        cell.font = { name: "Calibri", size: 10, color: { argb: "FF0B1033" } };
+        if (isZebra) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF7F9FD" } };
+        cell.border = { bottom: { style: "hair", color: { argb: "FFD3D9EE" } } };
+        cell.alignment = { vertical: "middle", horizontal: ["code", "name", "um", "type", "prov", "oc", "est"].includes(key) ? "left" : "right" };
+
+        if (["stock", "cons", "diff", "prop", "dec", "sfin", "moq", "red"].includes(key)) cell.numFmt = "#,##0.00";
+        if (["cost", "inv"].includes(key)) cell.numFmt = "$#,##0.00";
+        if (["ss", "cobi", "cobf"].includes(key)) cell.numFmt = "0%";
+        if (key === "dec" || key === "inv") cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: "FF011487" } };
+        if (key === "diff") {
+          cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: r.diff < 0 ? "FFB3261E" : "FF157A43" } };
+        }
+        if (key === "est") {
+          cell.alignment = { vertical: "middle", horizontal: "center" };
+          if (estado === "DÉFICIT") {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFDECEC" } };
+            cell.font = { name: "Calibri", size: 9.5, bold: true, color: { argb: "FFB3261E" } };
+          } else if (estado === "SIN COSTO") {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF4CC" } };
+            cell.font = { name: "Calibri", size: 9.5, bold: true, color: { argb: "FF011487" } };
+          } else {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7F6ED" } };
+            cell.font = { name: "Calibri", size: 9.5, bold: true, color: { argb: "FF157A43" } };
+          }
+        }
+      });
+    });
+
+    // Totals Row
+    const lastDataRow = 6 + rows.length;
+    const totRow = ws.addRow({});
+    totRow.height = 25;
+    totRow.getCell(2).value = `TOTAL GENERAL (${rows.length} insumos)`;
+    const invColIdx = cols.findIndex(c => c.key === "inv") + 1;
+    const invLetter = ws.getColumn(invColIdx).letter;
+    totRow.getCell(invColIdx).value = { formula: `SUM(${invLetter}7:${invLetter}${lastDataRow})`, result: Number(totInv.toFixed(2)) };
+    totRow.getCell(invColIdx).numFmt = "$#,##0.00";
+
+    for (let c = 1; c <= colCount; c++) {
+      const cell = totRow.getCell(c);
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF011487" } };
+      cell.font = { name: "Calibri", size: 10.5, bold: true, color: { argb: c === invColIdx ? "FFFFCB05" : "FFFFFFFF" } };
+      cell.alignment = { vertical: "middle", horizontal: c === invColIdx ? "right" : "left" };
+      cell.border = { top: { style: "medium", color: { argb: "FFFFCB05" } } };
+    }
+
+    ws.autoFilter = { from: { row: 6, column: 1 }, to: { row: 6, column: colCount } };
+
+    const buf = await wb.xlsx.writeBuffer();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    a.download = `Reporte-Compra-MRP-${planName.replace(/[^a-zA-Z0-9_-]/g, "_")}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    a.click();
+    toast("Reporte de Compra (Excel) descargado.");
+  } catch (err) {
+    console.error(err);
+    toast("Error generando Excel: " + (err.message || err), true);
+  } finally {
+    btn.disabled = false; btn.textContent = "Reporte Compra (Excel)";
+  }
+}
+
+let MRP_LOGO_CACHE = null;
+async function getLogoBase64() {
+  if (MRP_LOGO_CACHE !== null) return MRP_LOGO_CACHE;
+  try {
+    const b = await (await fetch("logo.png")).blob();
+    MRP_LOGO_CACHE = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
+  } catch { MRP_LOGO_CACHE = ""; }
+  return MRP_LOGO_CACHE;
+}
+
+async function exportAnalisisReportPdf() {
+  const mrp = computeMrp();
+  const rows = getFilteredAnalisisRows(mrp);
+  if (!rows.length) return toast("No hay insumos en la vista actual para exportar.", true);
+  if (!window.jspdf) return toast("jsPDF no cargó. Recargue la página.", true);
+
+  const btn = $("#btn_rep_pdf");
+  btn.disabled = true; btn.textContent = "Generando…";
+  try {
+    const planName = STATE.planes.find(p => p.id === STATE.activePlanId)?.name || "Planificación MRP";
+    const showAdv = STATE.fAnalisis.showAdv;
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const NAVY = [1, 20, 135], YEL = [255, 203, 5], SOFT = [238, 241, 250];
+    const logo = await getLogoBase64();
+
+    // Header Banner
+    doc.setFillColor(...NAVY); doc.rect(0, 0, W, 74, "F");
+    doc.setFillColor(...YEL); doc.rect(0, 74, W, 5, "F");
+    if (logo) doc.addImage(logo, "PNG", 28, 9, 56, 56);
+    doc.setTextColor(255); doc.setFont("helvetica", "bold"); doc.setFontSize(17);
+    doc.text("Reporte de Planificación de Compra (MRP)", 96, 35);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9.5);
+    const filtros = [STATE.fAnalisis.type || "MP y ME", STATE.fAnalisis.onlyActive ? "Solo activos" : "Todos", showAdv ? "Vista Completa" : "Vista Esencial"].join(" · ");
+    doc.text(`Plan: ${planName}  ·  Fecha: ${new Date().toLocaleDateString("es-VE")}  ·  ${filtros}`, 96, 54);
+
+    // KPI Summary Strip
+    const totInv = rows.reduce((s, r) => s + r.invUsd, 0);
+    const totMp = rows.filter(r => r.m.type === "MP").reduce((s, r) => s + r.invUsd, 0);
+    const totMe = rows.filter(r => r.m.type === "ME").reduce((s, r) => s + r.invUsd, 0);
+    const defCnt = rows.filter(r => r.hasDeficit).length;
+
+    doc.setFillColor(...SOFT); doc.roundedRect(28, 88, W - 56, 26, 4, 4, "F");
+    doc.setTextColor(...NAVY); doc.setFont("helvetica", "bold"); doc.setFontSize(9.5);
+    doc.text(`Inversión Total: ${fmtUsd(totInv)}   |   MP: ${fmtUsd(totMp)}   |   ME: ${fmtUsd(totMe)}   |   Insumos: ${rows.length}   |   Déficit: ${defCnt}`, 38, 105);
+
+    const head = showAdv
+      ? [["Código", "Insumo", "UM", "Tipo", "Stock", "Consumo", "Dif.", "Propuesta", "Decisión", "Proveedor", "O/C", "Stock Fin", "Inversión", "Estado"]]
+      : [["Código", "Insumo", "UM", "Tipo", "Stock Disp.", "Consumo", "Diferencia", "Propuesta", "Decisión", "Costo Unit.", "Inversión USD", "Estado"]];
+
+    const body = rows.map(r => {
+      const est = r.noCost ? "SIN COSTO" : r.hasDeficit ? "DÉFICIT" : "OK";
+      return showAdv
+        ? [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.suggested), fmt(r.decision), r.comp.provider || "—", r.comp.oc || "—", fmt(r.stockFinal), fmtUsd(r.invUsd), est]
+        : [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.suggested), fmt(r.decision), fmtUsd(r.cost), fmtUsd(r.invUsd), est];
+    });
+
+    const totalRow = showAdv
+      ? ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", "", "", "", fmtUsd(totInv), ""]
+      : ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", "", fmtUsd(totInv), ""];
+    body.push(totalRow);
+
+    doc.autoTable({
+      startY: 122,
+      margin: { left: 28, right: 28, bottom: 34 },
+      head,
+      body,
+      styles: { fontSize: showAdv ? 7.2 : 8.2, cellPadding: 4.5, overflow: "linebreak", valign: "middle" },
+      headStyles: { fillColor: NAVY, textColor: 255, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: [247, 249, 253] },
+      didParseCell: data => {
+        if (data.section === "body" && data.row.index === body.length - 1) {
+          data.cell.styles.fillColor = NAVY;
+          data.cell.styles.textColor = 255;
+          data.cell.styles.fontStyle = "bold";
+        }
+        if (data.section === "body" && data.row.index < body.length - 1) {
+          const val = String(data.cell.raw || "");
+          if (val === "DÉFICIT") { data.cell.styles.textColor = [179, 38, 30]; data.cell.styles.fontStyle = "bold"; }
+          else if (val === "OK") { data.cell.styles.textColor = [21, 122, 67]; data.cell.styles.fontStyle = "bold"; }
+          else if (val === "SIN COSTO") { data.cell.styles.textColor = [150, 95, 0]; data.cell.styles.fontStyle = "bold"; }
+        }
+      }
+    });
+
+    const pages = doc.getNumberOfPages();
+    for (let i = 1; i <= pages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8); doc.setTextColor(110);
+      doc.text(`${window.CFG.EMPRESA || "Alimentos Mida"} · Departamento de Compras · Reporte MRP`, 28, H - 16);
+      doc.text(`Página ${i} de ${pages}`, W - 28, H - 16, { align: "right" });
+    }
+
+    doc.save(`Reporte-Compra-MRP-${planName.replace(/[^a-zA-Z0-9_-]/g, "_")}-${new Date().toISOString().slice(0, 10)}.pdf`);
+    toast("Reporte de Compra (PDF) descargado.");
+  } catch (err) {
+    console.error(err);
+    toast("Error generando PDF: " + (err.message || err), true);
+  } finally {
+    btn.disabled = false; btn.textContent = "Reporte Compra (PDF)";
+  }
+}
+
+// -------------------- 4. PROCURA SEMANAL (SIN PÉRDIDA DE FOCO) --------------------
+function renderProcura(v) {
   v.innerHTML = `
-    <div class="kpi-grid">
-      ${[0, 1, 2, 3, 4].map(i => `<div class="kpi-card"><div class="kpi-label">Inversión Sem 0${i + 1}</div><div class="kpi-val">${fmtUsd(mrp.weeklyUsd[i])}</div></div>`).join("")}
-    </div>
+    <div id="fpr_kpis" class="kpi-grid"></div>
     <div class="bar">
       <input type="search" id="fpr_q" placeholder="Buscar insumo…" value="${esc(STATE.fProcura.q)}">
       <label class="toggle-lbl"><input type="checkbox" id="fpr_act" ${STATE.fProcura.onlyActive ? "checked" : ""}> Solo insumos con compra o consumo</label>
@@ -694,39 +1007,56 @@ function renderProcura(v) {
         <th class="num">Sem 1</th><th class="num">Sem 2</th><th class="num">Sem 3</th><th class="num">Sem 4</th><th class="num">Sem 5</th>
         <th>Check</th>
       </tr></thead>
-      <tbody>
-        ${rows.map(r => {
-          const sumW = num(r.comp.w1) + num(r.comp.w2) + num(r.comp.w3) + num(r.comp.w4) + num(r.comp.w5);
-          const ok = Math.abs(sumW - r.decision) < 0.05;
-          return `<tr data-mat="${esc(r.m.code)}">
-            <td><strong>${esc(r.m.name)}</strong><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)}</div></td>
-            <td class="num"><strong>${fmt(r.decision)}</strong></td>
-            ${["w1", "w2", "w3", "w4", "w5"].map(wk => `
-              <td class="num">
-                <input class="cell-inp" type="number" step="any" min="0" data-wk="${wk}" value="${num(r.comp[wk])}">
-                <div class="hint">Cons: ${fmt(r.c[wk], 1)}</div>
-              </td>`).join("")}
-            <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
-          </tr>`;
-        }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:20px">No hay insumos activos en Procura Semanal.</td></tr>`}
-      </tbody>
+      <tbody id="fpr_body"></tbody>
     </table></div>`;
 
-  $("#fpr_q").oninput = e => { STATE.fProcura.q = e.target.value; renderProcura(v); };
-  $("#fpr_act").onchange = e => { STATE.fProcura.onlyActive = e.target.checked; renderProcura(v); };
+  const paintRows = () => {
+    const mrp = computeMrp();
+    $("#fpr_kpis").innerHTML = [0, 1, 2, 3, 4].map(i => `<div class="kpi-card"><div class="kpi-label">Inversión Sem 0${i + 1}</div><div class="kpi-val">${fmtUsd(mrp.weeklyUsd[i])}</div></div>`).join("");
+    const q = STATE.fProcura.q.toLowerCase().trim();
+    const rows = mrp.rows.filter(r =>
+      (!STATE.fProcura.onlyActive || r.decision > 0 || r.c.total > 0) &&
+      (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
+    );
+    const tb = $("#fpr_body");
+    tb.innerHTML = rows.map(r => {
+      const sumW = num(r.comp.w1) + num(r.comp.w2) + num(r.comp.w3) + num(r.comp.w4) + num(r.comp.w5);
+      const ok = Math.abs(sumW - r.decision) < 0.05;
+      return `<tr data-mat="${esc(r.m.code)}">
+        <td><strong>${esc(r.m.name)}</strong><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)}</div></td>
+        <td class="num"><strong>${fmt(r.decision)}</strong></td>
+        ${["w1", "w2", "w3", "w4", "w5"].map(wk => `
+          <td class="num">
+            <input class="cell-inp" type="number" step="any" min="0" data-wk="${wk}" value="${num(r.comp[wk])}">
+            <div class="hint">Cons: ${fmt(r.c[wk], 1)}</div>
+          </td>`).join("")}
+        <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:20px">No hay insumos activos en Procura Semanal.</td></tr>`;
 
-  v.querySelectorAll("input[data-wk]").forEach(inp => {
-    inp.onchange = () => {
-      const code = inp.closest("tr").dataset.mat;
-      const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
-      cur[inp.dataset.wk] = Math.max(0, num(inp.value));
-      STATE.compras.set(code, cur);
-      saveCompra(cur);
-      renderProcura(v);
-    };
-  });
+    tb.querySelectorAll("input[data-wk]").forEach(inp => {
+      inp.onchange = () => {
+        const code = inp.closest("tr").dataset.mat;
+        const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
+        cur[inp.dataset.wk] = Math.max(0, num(inp.value));
+        STATE.compras.set(code, cur);
+        saveCompra(cur);
+        paintRows();
+      };
+    });
+  };
+
+  paintRows();
+  $("#fpr_q").oninput = e => { STATE.fProcura.q = e.target.value; paintRows(); };
+  $("#fpr_act").onchange = e => { STATE.fProcura.onlyActive = e.target.checked; paintRows(); };
 
   $("#btn_autodist").onclick = async () => {
+    const mrp = computeMrp();
+    const q = STATE.fProcura.q.toLowerCase().trim();
+    const rows = mrp.rows.filter(r =>
+      (!STATE.fProcura.onlyActive || r.decision > 0 || r.c.total > 0) &&
+      (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
+    );
     const updates = [];
     for (const r of rows) {
       if (r.decision <= 0) continue;
@@ -755,19 +1085,13 @@ function renderProcura(v) {
       await batchUpsert("mrp_compras", updates, "plan_id,mat_code");
       setSync("ok");
       toast(`Distribuidas ${updates.length} compras semanalmente.`);
-      renderProcura(v);
+      paintRows();
     } catch (e) { setSync("err"); toast(e.message, true); }
   };
 }
 
-// -------------------- 5. CATÁLOGO E INVENTARIO (SIN COSTOS) --------------------
+// -------------------- 5. CATÁLOGO E INVENTARIO (SIN PÉRDIDA DE FOCO + EDITAR INSUMOS) --------------------
 function renderCatalogo(v) {
-  const q = STATE.fCatalogo.q.toLowerCase();
-  const list = [...STATE.materials.values()].filter(m =>
-    (!STATE.fCatalogo.type || m.type === STATE.fCatalogo.type) &&
-    (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
-  );
-
   v.innerHTML = `
     <div class="bar">
       <input type="search" id="fc_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fCatalogo.q)}">
@@ -782,60 +1106,76 @@ function renderCatalogo(v) {
       <thead><tr>
         <th>Código</th><th>Descripción</th><th>UM</th><th>Tipo</th>
         <th class="num">Stock Disponible</th><th class="num">Lead (días)</th><th class="num">MOQ</th><th class="num">Redondeo</th><th class="num">% Stock Seg.</th>
-        <th></th>
+        <th>Acciones</th>
       </tr></thead>
-      <tbody>
-        ${list.map(m => `<tr data-mat="${esc(m.code)}">
-          <td><code>${esc(m.code)}</code></td>
-          <td><strong>${esc(m.name)}</strong></td>
-          <td>${esc(m.um)}</td>
-          <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
-          <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="stock" value="${num(m.stock)}"></td>
-          <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="lead_time" value="${num(m.lead_time)}"></td>
-          <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="moq" value="${num(m.moq)}"></td>
-          <td class="num"><input class="cell-inp" type="number" step="any" min="0.01" data-mf="rounding" value="${num(m.rounding)}"></td>
-          <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="safety_pct" value="${Math.round(num(m.safety_pct) * 100)}"></td>
-          <td><button class="btn-sm btn-danger" data-delmat="${esc(m.code)}">Eliminar</button></td>
-        </tr>`).join("") || `<tr><td colspan="10" class="hint" style="text-align:center;padding:20px">Sin insumos registrados.</td></tr>`}
-      </tbody>
+      <tbody id="fc_body"></tbody>
     </table></div>`;
 
-  $("#fc_q").oninput = e => { STATE.fCatalogo.q = e.target.value; renderCatalogo(v); };
-  $("#fc_type").onchange = e => { STATE.fCatalogo.type = e.target.value; renderCatalogo(v); };
-  $("#btn_new_mat").onclick = () => openNewMaterialModal();
+  const paintRows = () => {
+    const q = STATE.fCatalogo.q.toLowerCase().trim();
+    const list = [...STATE.materials.values()].filter(m =>
+      (!STATE.fCatalogo.type || m.type === STATE.fCatalogo.type) &&
+      (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+    );
+    const tb = $("#fc_body");
+    tb.innerHTML = list.map(m => `<tr data-mat="${esc(m.code)}">
+      <td><code>${esc(m.code)}</code></td>
+      <td><strong>${esc(m.name)}</strong></td>
+      <td>${esc(m.um)}</td>
+      <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+      <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="stock" value="${num(m.stock)}"></td>
+      <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="lead_time" value="${num(m.lead_time)}"></td>
+      <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="moq" value="${num(m.moq)}"></td>
+      <td class="num"><input class="cell-inp" type="number" step="any" min="0.01" data-mf="rounding" value="${num(m.rounding)}"></td>
+      <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="safety_pct" value="${Math.round(num(m.safety_pct) * 100)}"></td>
+      <td style="white-space:nowrap">
+        <button class="btn-sm" data-editmat="${esc(m.code)}">Editar</button>
+        <button class="btn-sm btn-danger" data-delmat="${esc(m.code)}">Eliminar</button>
+      </td>
+    </tr>`).join("") || `<tr><td colspan="10" class="hint" style="text-align:center;padding:20px">Sin insumos registrados.</td></tr>`;
 
-  v.querySelectorAll("input[data-mf]").forEach(inp => {
-    inp.onchange = () => {
-      const code = inp.closest("tr").dataset.mat;
-      const m = STATE.materials.get(code);
-      const f = inp.dataset.mf;
-      m[f] = f === "safety_pct" ? Math.max(0, num(inp.value) / 100) : Math.max(0, num(inp.value));
-      debounceSave("mat_" + code, async () => {
-        const { error } = await sb.from("mrp_materiales").update({ [f]: m[f], updated_at: new Date().toISOString() }).eq("code", code);
-        if (error) throw error;
-      });
-    };
-  });
+    tb.querySelectorAll("input[data-mf]").forEach(inp => {
+      inp.onchange = () => {
+        const code = inp.closest("tr").dataset.mat;
+        const m = STATE.materials.get(code);
+        const f = inp.dataset.mf;
+        m[f] = f === "safety_pct" ? Math.max(0, num(inp.value) / 100) : Math.max(0, num(inp.value));
+        debounceSave("mat_" + code, async () => {
+          const { error } = await sb.from("mrp_materiales").update({ [f]: m[f], updated_at: new Date().toISOString() }).eq("code", code);
+          if (error) throw error;
+        });
+      };
+    });
 
-  v.querySelectorAll("[data-delmat]").forEach(btn => {
-    btn.onclick = async () => {
-      const code = btn.dataset.delmat;
-      const usedIn = [];
-      for (const [skuCode, items] of STATE.bom.entries()) {
-        if (items.some(i => i.mat_code === code)) usedIn.push(skuCode);
-      }
-      if (usedIn.length) {
-        return toast(`No se puede eliminar: usado en ${usedIn.length} fórmula(s) (${usedIn.slice(0, 3).join(", ")}).`, true);
-      }
-      if (!confirm(`¿Eliminar el insumo ${code} de Supabase?`)) return;
-      const { error } = await sb.from("mrp_materiales").delete().eq("code", code);
-      if (error) return toast("Error al eliminar: " + error.message, true);
-      STATE.materials.delete(code);
-      STATE.compras.delete(code);
-      toast("Insumo eliminado.");
-      renderCatalogo(v);
-    };
-  });
+    tb.querySelectorAll("[data-editmat]").forEach(btn => {
+      btn.onclick = () => openEditMaterialModal(btn.dataset.editmat, paintRows);
+    });
+
+    tb.querySelectorAll("[data-delmat]").forEach(btn => {
+      btn.onclick = async () => {
+        const code = btn.dataset.delmat;
+        const usedIn = [];
+        for (const [skuCode, items] of STATE.bom.entries()) {
+          if (items.some(i => i.mat_code === code)) usedIn.push(skuCode);
+        }
+        if (usedIn.length) {
+          return toast(`No se puede eliminar: usado en ${usedIn.length} fórmula(s) (${usedIn.slice(0, 3).join(", ")}).`, true);
+        }
+        if (!confirm(`¿Eliminar el insumo ${code} de Supabase?`)) return;
+        const { error } = await sb.from("mrp_materiales").delete().eq("code", code);
+        if (error) return toast("Error al eliminar: " + error.message, true);
+        STATE.materials.delete(code);
+        STATE.compras.delete(code);
+        toast("Insumo eliminado.");
+        paintRows();
+      };
+    });
+  };
+
+  paintRows();
+  $("#fc_q").oninput = e => { STATE.fCatalogo.q = e.target.value; paintRows(); };
+  $("#fc_type").onchange = e => { STATE.fCatalogo.type = e.target.value; paintRows(); };
+  $("#btn_new_mat").onclick = () => openNewMaterialModal(paintRows);
 }
 
 function openNewMaterialModal(onCreated) {
@@ -887,23 +1227,78 @@ function openNewMaterialModal(onCreated) {
   };
 }
 
-// -------------------- 6. COSTOS DE COMPRA (SECCIÓN ÚNICA) --------------------
-function renderCostos(v) {
-  const q = STATE.fCostos.q.toLowerCase();
-  const all = [...STATE.materials.values()];
-  const zeroCount = all.filter(m => num(m.cost) <= 0).length;
-  const list = all.filter(m =>
-    (!STATE.fCostos.type || m.type === STATE.fCostos.type) &&
-    (!STATE.fCostos.onlyZero || num(m.cost) <= 0) &&
-    (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
-  );
-
-  v.innerHTML = `
-    <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">Total Insumos</div><div class="kpi-val">${all.length}</div></div>
-      <div class="kpi-card ok"><div class="kpi-label">Con Último Costo</div><div class="kpi-val">${all.length - zeroCount}</div></div>
-      <div class="kpi-card ${zeroCount ? "warn" : "ok"}"><div class="kpi-label">Pendientes ($0)</div><div class="kpi-val">${zeroCount}</div></div>
+function openEditMaterialModal(code, onSaved) {
+  const m = STATE.materials.get(code);
+  if (!m) return;
+  let usedCount = 0;
+  for (const items of STATE.bom.values()) {
+    if (items.some(i => i.mat_code === code)) usedCount++;
+  }
+  const d = $("#dlg");
+  d.innerHTML = `<form id="mf_edit" autocomplete="off">
+    <h2>Editar Insumo</h2>
+    <p class="hint" style="margin:0 0 12px">Usado en <strong>${usedCount}</strong> fórmula(s). Los cambios se reflejan en todo el sistema y se guardan en Supabase. El costo unitario se edita en <strong>Costos de Compra</strong>.</p>
+    <div class="row">
+      <label>Código (fijo)<input type="text" value="${esc(m.code)}" disabled></label>
+      <label>Tipo *<select name="type">
+        <option value="MP" ${m.type === "MP" ? "selected" : ""}>Materia Prima (MP)</option>
+        <option value="ME" ${m.type === "ME" ? "selected" : ""}>Material Empaque (ME)</option>
+      </select></label>
     </div>
+    <label>Descripción *<input type="text" name="name" required value="${esc(m.name)}"></label>
+    <div class="row">
+      <label>Unidad de Medida *<input type="text" name="um" required value="${esc(m.um)}"></label>
+      <label>Stock Disponible<input type="number" step="any" min="0" name="stock" value="${num(m.stock)}"></label>
+    </div>
+    <div class="row">
+      <label>Lead Time (días)<input type="number" step="1" min="0" name="lead_time" value="${num(m.lead_time)}"></label>
+      <label>Compra Mínima (MOQ)<input type="number" step="any" min="0" name="moq" value="${num(m.moq)}"></label>
+    </div>
+    <div class="row">
+      <label>Redondeo<input type="number" step="any" min="0.01" name="rounding" value="${num(m.rounding) || 1}"></label>
+      <label>% Stock Seguridad<input type="number" step="1" min="0" name="safety_pct" value="${Math.round(num(m.safety_pct) * 100)}"></label>
+    </div>
+    <div class="err" id="me_err"></div>
+    <div class="bar"><button class="primary" type="submit" id="me_save">Guardar Cambios</button><button type="button" id="me_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#me_cls").onclick = () => d.close();
+  $("#mf_edit").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    const name = f.name.value.trim();
+    const um = f.um.value.trim() || "Kg";
+    if (!name) return $("#me_err").textContent = "La descripción es obligatoria.";
+    const btn = $("#me_save");
+    btn.disabled = true; btn.textContent = "Guardando…";
+    const updates = {
+      name,
+      um,
+      type: f.type.value,
+      stock: Math.max(0, num(f.stock.value)),
+      lead_time: Math.max(0, num(f.lead_time.value)),
+      moq: Math.max(0, num(f.moq.value)),
+      rounding: Math.max(0.01, num(f.rounding.value) || 1),
+      safety_pct: Math.max(0, num(f.safety_pct.value) / 100),
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await sb.from("mrp_materiales").update(updates).eq("code", code);
+    if (error) {
+      $("#me_err").textContent = error.message;
+      btn.disabled = false; btn.textContent = "Guardar Cambios";
+      return;
+    }
+    Object.assign(m, updates);
+    d.close();
+    toast(`Insumo "${name}" actualizado.`);
+    if (onSaved) onSaved(); else renderView();
+  };
+}
+
+// -------------------- 6. COSTOS DE COMPRA (SIN PÉRDIDA DE FOCO) --------------------
+function renderCostos(v) {
+  v.innerHTML = `
+    <div id="fco_kpis" class="kpi-grid"></div>
     <div class="bar">
       <input type="search" id="fco_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fCostos.q)}">
       <select id="fco_type">
@@ -918,38 +1313,55 @@ function renderCostos(v) {
         <th>Código</th><th>Insumo</th><th>UM</th><th>Tipo</th>
         <th class="num">Costo Anterior</th><th class="num">Último Costo (USD)</th><th class="num">% Variación</th><th>Actualizado</th><th>Acciones</th>
       </tr></thead>
-      <tbody>
-        ${list.map(m => {
-          const c = num(m.cost), pc = num(m.prev_cost);
-          const diffPct = pc > 0 ? ((c - pc) / pc) * 100 : null;
-          const upd = m.cost_updated_at ? new Date(m.cost_updated_at).toLocaleDateString("es-VE") : "—";
-          return `<tr>
-            <td><code>${esc(m.code)}</code></td>
-            <td><strong>${esc(m.name)}</strong></td>
-            <td>${esc(m.um)}</td>
-            <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
-            <td class="num">${pc > 0 ? fmtUsd(pc) : "—"}</td>
-            <td class="num"><strong style="color:${c <= 0 ? "var(--danger)" : "var(--brand)"}">${fmtUsd(c)}</strong></td>
-            <td class="num">${diffPct === null ? "—" : `<span style="color:${diffPct > 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${diffPct > 0 ? "+" : ""}${fmt(diffPct, 1)}%</span>`}</td>
-            <td class="hint">${upd}</td>
-            <td style="white-space:nowrap">
-              <button class="btn-sm primary" data-updcost="${esc(m.code)}">Actualizar Costo</button>
-              <button class="btn-sm" data-hist="${esc(m.code)}">Historial</button>
-            </td>
-          </tr>`;
-        }).join("") || `<tr><td colspan="9" class="hint" style="text-align:center;padding:20px">No hay insumos que coincidan.</td></tr>`}
-      </tbody>
+      <tbody id="fco_body"></tbody>
     </table></div>`;
 
-  $("#fco_q").oninput = e => { STATE.fCostos.q = e.target.value; renderCostos(v); };
-  $("#fco_type").onchange = e => { STATE.fCostos.type = e.target.value; renderCostos(v); };
-  $("#fco_zero").onchange = e => { STATE.fCostos.onlyZero = e.target.checked; renderCostos(v); };
+  const paintRows = () => {
+    const q = STATE.fCostos.q.toLowerCase().trim();
+    const all = [...STATE.materials.values()];
+    const zeroCount = all.filter(m => num(m.cost) <= 0).length;
+    $("#fco_kpis").innerHTML = `
+      <div class="kpi-card"><div class="kpi-label">Total Insumos</div><div class="kpi-val">${all.length}</div></div>
+      <div class="kpi-card ok"><div class="kpi-label">Con Último Costo</div><div class="kpi-val">${all.length - zeroCount}</div></div>
+      <div class="kpi-card ${zeroCount ? "warn" : "ok"}"><div class="kpi-label">Pendientes ($0)</div><div class="kpi-val">${zeroCount}</div></div>`;
 
-  v.querySelectorAll("[data-updcost]").forEach(b => b.onclick = () => openUpdateCostModal(b.dataset.updcost));
-  v.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => openCostHistoryModal(b.dataset.hist));
+    const list = all.filter(m =>
+      (!STATE.fCostos.type || m.type === STATE.fCostos.type) &&
+      (!STATE.fCostos.onlyZero || num(m.cost) <= 0) &&
+      (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+    );
+    const tb = $("#fco_body");
+    tb.innerHTML = list.map(m => {
+      const c = num(m.cost), pc = num(m.prev_cost);
+      const diffPct = pc > 0 ? ((c - pc) / pc) * 100 : null;
+      const upd = m.cost_updated_at ? new Date(m.cost_updated_at).toLocaleDateString("es-VE") : "—";
+      return `<tr>
+        <td><code>${esc(m.code)}</code></td>
+        <td><strong>${esc(m.name)}</strong></td>
+        <td>${esc(m.um)}</td>
+        <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+        <td class="num">${pc > 0 ? fmtUsd(pc) : "—"}</td>
+        <td class="num"><strong style="color:${c <= 0 ? "var(--danger)" : "var(--brand)"}">${fmtUsd(c)}</strong></td>
+        <td class="num">${diffPct === null ? "—" : `<span style="color:${diffPct > 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${diffPct > 0 ? "+" : ""}${fmt(diffPct, 1)}%</span>`}</td>
+        <td class="hint">${upd}</td>
+        <td style="white-space:nowrap">
+          <button class="btn-sm primary" data-updcost="${esc(m.code)}">Actualizar Costo</button>
+          <button class="btn-sm" data-hist="${esc(m.code)}">Historial</button>
+        </td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="9" class="hint" style="text-align:center;padding:20px">No hay insumos que coincidan.</td></tr>`;
+
+    tb.querySelectorAll("[data-updcost]").forEach(b => b.onclick = () => openUpdateCostModal(b.dataset.updcost, paintRows));
+    tb.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => openCostHistoryModal(b.dataset.hist));
+  };
+
+  paintRows();
+  $("#fco_q").oninput = e => { STATE.fCostos.q = e.target.value; paintRows(); };
+  $("#fco_type").onchange = e => { STATE.fCostos.type = e.target.value; paintRows(); };
+  $("#fco_zero").onchange = e => { STATE.fCostos.onlyZero = e.target.checked; paintRows(); };
 }
 
-function openUpdateCostModal(code) {
+function openUpdateCostModal(code, onSaved) {
   const m = STATE.materials.get(code);
   const d = $("#dlg");
   d.innerHTML = `<form id="cf_upd" autocomplete="off">
@@ -985,7 +1397,7 @@ function openUpdateCostModal(code) {
       m.prev_cost = oldCost; m.cost = newCost; m.cost_updated_at = now;
       d.close();
       toast(`Último costo de ${m.name} actualizado a ${fmtUsd(newCost)}.`);
-      renderView();
+      if (onSaved) onSaved(); else renderView();
     } catch (err) {
       $("#cu_err").textContent = err.message || "Error al guardar.";
     }
@@ -1017,169 +1429,183 @@ async function openCostHistoryModal(code) {
     <div class="bar" style="margin-top:14px"><button type="button" onclick="this.closest('dialog').close()">Cerrar</button></div>`;
 }
 
-// -------------------- 7. FÓRMULAS (BOM) CON CREAR / DUPLICAR / ELIMINAR --------------------
+// -------------------- 7. FÓRMULAS (BOM) SIN PÉRDIDA DE FOCO --------------------
 function renderFormulas(v) {
   const cats = [...new Set([...STATE.skus.values()].map(s => s.category))].sort();
-  const q = STATE.fBom.q.toLowerCase();
-  const skus = [...STATE.skus.values()].filter(s =>
-    (!STATE.fBom.cat || s.category === STATE.fBom.cat) &&
-    (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
-  );
-  if (STATE.selectedSku && !STATE.skus.has(STATE.selectedSku)) STATE.selectedSku = skus[0]?.code || null;
-  if (!STATE.selectedSku && skus.length) STATE.selectedSku = skus[0].code;
-
-  const sel = STATE.selectedSku ? STATE.skus.get(STATE.selectedSku) : null;
-  const bom = sel ? (STATE.bom.get(sel.code) || []) : [];
-  const cb = sel ? skuCostBreakdown(sel.code) : null;
-  const massOk = sel ? Math.abs(cb.kgSum - num(sel.batch_size_kg)) <= Math.max(1, num(sel.batch_size_kg) * 0.01) : true;
-
   v.innerHTML = `
     <div class="bom-layout">
       <div class="panel-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <h3 style="margin:0">SKUs (${STATE.skus.size})</h3>
+          <h3 style="margin:0">SKUs (<span id="fb_cnt">${STATE.skus.size}</span>)</h3>
           <button id="btn_new_sku" class="btn-sm primary">+ Nueva</button>
         </div>
         <input type="search" id="fb_q" placeholder="Filtrar SKU…" value="${esc(STATE.fBom.q)}" style="margin-bottom:8px">
         <select id="fb_cat" style="margin-bottom:10px"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === STATE.fBom.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
-        <div class="sku-list">
-          ${skus.map(s => `<button class="sku-item ${s.code === STATE.selectedSku ? "active" : ""}" data-selsku="${esc(s.code)}">
-            <div><strong>${esc(s.name)}</strong></div>
-            <div class="hint">${esc(s.code)} · ${esc(s.category)} · ${(STATE.bom.get(s.code) || []).length} ins.</div>
-          </button>`).join("") || `<p class="hint">Sin fórmulas.</p>`}
+        <div class="sku-list" id="fb_list"></div>
+      </div>
+      <div class="panel-card" id="fb_detail"></div>
+    </div>`;
+
+  const paintList = () => {
+    const q = STATE.fBom.q.toLowerCase().trim();
+    const skus = [...STATE.skus.values()].filter(s =>
+      (!STATE.fBom.cat || s.category === STATE.fBom.cat) &&
+      (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
+    );
+    if (STATE.selectedSku && !STATE.skus.has(STATE.selectedSku)) STATE.selectedSku = skus[0]?.code || null;
+    if (!STATE.selectedSku && skus.length) STATE.selectedSku = skus[0].code;
+
+    $("#fb_cnt").textContent = STATE.skus.size;
+    const box = $("#fb_list");
+    box.innerHTML = skus.map(s => `<button class="sku-item ${s.code === STATE.selectedSku ? "active" : ""}" data-selsku="${esc(s.code)}">
+      <div><strong>${esc(s.name)}</strong></div>
+      <div class="hint">${esc(s.code)} · ${esc(s.category)} · ${(STATE.bom.get(s.code) || []).length} ins.</div>
+    </button>`).join("") || `<p class="hint">Sin fórmulas.</p>`;
+
+    box.querySelectorAll("[data-selsku]").forEach(b => b.onclick = () => {
+      STATE.selectedSku = b.dataset.selsku;
+      paintList();
+      paintDetail();
+    });
+  };
+
+  const paintDetail = () => {
+    const det = $("#fb_detail");
+    const sel = STATE.selectedSku ? STATE.skus.get(STATE.selectedSku) : null;
+    if (!sel) {
+      det.innerHTML = `<div class="empty-hero"><h3>Seleccione o cree una fórmula</h3><button class="primary" id="btn_new_sku2">+ Nueva Fórmula</button></div>`;
+      $("#btn_new_sku2").onclick = () => openNewSkuModal();
+      return;
+    }
+    const bom = STATE.bom.get(sel.code) || [];
+    const cb = skuCostBreakdown(sel.code);
+    const massOk = Math.abs(cb.kgSum - num(sel.batch_size_kg)) <= Math.max(1, num(sel.batch_size_kg) * 0.01);
+
+    det.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+        <div>
+          <h3 style="margin:0">${esc(sel.name)}</h3>
+          <div class="hint">Código: <code>${esc(sel.code)}</code> · Categoría: <strong>${esc(sel.category)}</strong></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-sm" id="btn_dup_sku">Duplicar Fórmula</button>
+          <button class="btn-sm btn-danger" id="btn_del_sku">Eliminar Fórmula</button>
         </div>
       </div>
 
-      <div class="panel-card">
-        ${sel ? `
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px">
-            <div>
-              <h3 style="margin:0">${esc(sel.name)}</h3>
-              <div class="hint">Código: <code>${esc(sel.code)}</code> · Categoría: <strong>${esc(sel.category)}</strong></div>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn-sm" id="btn_dup_sku">Duplicar Fórmula</button>
-              <button class="btn-sm btn-danger" id="btn_del_sku">Eliminar Fórmula</button>
-            </div>
-          </div>
-
-          <div class="row" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:12px">
-            <label>Unds / Caja<input type="number" step="1" min="1" id="sk_uc" value="${num(sel.units_per_case)}"></label>
-            <label>Peso Neto / Caja (Kg)<input type="number" step="any" min="0.01" id="sk_pw" value="${num(sel.net_weight_per_case)}"></label>
-            <label>Tamaño Lote (Kg)<input type="number" step="any" min="1" id="sk_bk" value="${num(sel.batch_size_kg)}"></label>
-            <label>Rendimiento (%)<input type="number" step="any" min="1" max="100" id="sk_yp" value="${num(sel.yield_pct || 98)}"></label>
-            <label>Lote (Cajas)<input type="number" step="any" id="sk_bc" value="${fmt(sel.batch_size_cases, 2).replace(",", ".")}" disabled></label>
-          </div>
-
-          <div class="kpi-grid" style="margin-bottom:14px">
-            <div class="kpi-card"><div class="kpi-label">Costo Lote (MP / ME)</div><div class="kpi-val">${fmtUsd(cb.total)}</div><div class="kpi-sub">MP: ${fmtUsd(cb.mp)} · ME: ${fmtUsd(cb.me)}</div></div>
-            <div class="kpi-card accent"><div class="kpi-label">Costo / Caja</div><div class="kpi-val">${fmtUsd(cb.perCase)}</div><div class="kpi-sub">Costo / Und: ${fmtUsd(cb.perUnit)}</div></div>
-            <div class="kpi-card ${massOk ? "ok" : "warn"}"><div class="kpi-label">Balance Masa MP</div><div class="kpi-val">${fmt(cb.kgSum, 2)} kg</div><div class="kpi-sub">Meta: ${fmt(sel.batch_size_kg, 0)} kg · ${massOk ? "OK ✓" : "REVISAR (±1%)"}</div></div>
-          </div>
-
-          <div class="bar">
-            <select id="bom_add_mat" style="flex:1;min-width:220px">
-              <option value="">+ Agregar insumo a la receta…</option>
-              ${[...STATE.materials.values()].map(m => `<option value="${esc(m.code)}">[${m.type}] ${esc(m.code)} — ${esc(m.name)} (${esc(m.um)})</option>`).join("")}
-            </select>
-            <input type="number" id="bom_add_qty" step="any" min="0" placeholder="Cant/Lote" style="width:120px">
-            <button id="btn_bom_add" class="primary" style="padding:8px 14px;font-size:.86rem">Agregar</button>
-            <button id="btn_bom_newmat" class="btn-sm">+ Crear Insumo</button>
-          </div>
-
-          <div class="tablebox"><table class="mrp-table">
-            <thead><tr><th>Código</th><th>Insumo</th><th>Tipo</th><th>UM</th><th class="num">Cant. / Lote</th><th class="num">Último Costo</th><th class="num">Subtotal Lote</th><th></th></tr></thead>
-            <tbody>
-              ${bom.map(it => {
-                const m = STATE.materials.get(it.mat_code);
-                if (!m) return "";
-                return `<tr data-mat="${esc(m.code)}">
-                  <td><code>${esc(m.code)}</code></td>
-                  <td><strong>${esc(m.name)}</strong></td>
-                  <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
-                  <td>${esc(m.um)}</td>
-                  <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-bqty value="${num(it.qty_per_batch)}"></td>
-                  <td class="num">${fmtUsd(m.cost)}</td>
-                  <td class="num"><strong>${fmtUsd(num(it.qty_per_batch) * num(m.cost))}</strong></td>
-                  <td><button class="btn-sm btn-danger" data-brm="${esc(m.code)}">Quitar</button></td>
-                </tr>`;
-              }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:18px">Esta fórmula no tiene ingredientes cargados.</td></tr>`}
-            </tbody>
-          </table></div>
-        ` : `<div class="empty-hero"><h3>Seleccione o cree una fórmula</h3><button class="primary" id="btn_new_sku2">+ Nueva Fórmula</button></div>`}
+      <div class="row" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:12px">
+        <label>Unds / Caja<input type="number" step="1" min="1" id="sk_uc" value="${num(sel.units_per_case)}"></label>
+        <label>Peso Neto / Caja (Kg)<input type="number" step="any" min="0.01" id="sk_pw" value="${num(sel.net_weight_per_case)}"></label>
+        <label>Tamaño Lote (Kg)<input type="number" step="any" min="1" id="sk_bk" value="${num(sel.batch_size_kg)}"></label>
+        <label>Rendimiento (%)<input type="number" step="any" min="1" max="100" id="sk_yp" value="${num(sel.yield_pct || 98)}"></label>
+        <label>Lote (Cajas)<input type="number" step="any" id="sk_bc" value="${fmt(sel.batch_size_cases, 2).replace(",", ".")}" disabled></label>
       </div>
-    </div>`;
 
-  $("#fb_q").oninput = e => { STATE.fBom.q = e.target.value; renderFormulas(v); };
-  $("#fb_cat").onchange = e => { STATE.fBom.cat = e.target.value; renderFormulas(v); };
-  $("#btn_new_sku").onclick = () => openNewSkuModal();
-  if ($("#btn_new_sku2")) $("#btn_new_sku2").onclick = () => openNewSkuModal();
+      <div class="kpi-grid" style="margin-bottom:14px">
+        <div class="kpi-card"><div class="kpi-label">Costo Lote (MP / ME)</div><div class="kpi-val">${fmtUsd(cb.total)}</div><div class="kpi-sub">MP: ${fmtUsd(cb.mp)} · ME: ${fmtUsd(cb.me)}</div></div>
+        <div class="kpi-card accent"><div class="kpi-label">Costo / Caja</div><div class="kpi-val">${fmtUsd(cb.perCase)}</div><div class="kpi-sub">Costo / Und: ${fmtUsd(cb.perUnit)}</div></div>
+        <div class="kpi-card ${massOk ? "ok" : "warn"}"><div class="kpi-label">Balance Masa MP</div><div class="kpi-val">${fmt(cb.kgSum, 2)} kg</div><div class="kpi-sub">Meta: ${fmt(sel.batch_size_kg, 0)} kg · ${massOk ? "OK ✓" : "REVISAR (±1%)"}</div></div>
+      </div>
 
-  v.querySelectorAll("[data-selsku]").forEach(b => b.onclick = () => { STATE.selectedSku = b.dataset.selsku; renderFormulas(v); });
-  if (!sel) return;
+      <div class="bar">
+        <select id="bom_add_mat" style="flex:1;min-width:220px">
+          <option value="">+ Agregar insumo a la receta…</option>
+          ${[...STATE.materials.values()].map(m => `<option value="${esc(m.code)}">[${m.type}] ${esc(m.code)} — ${esc(m.name)} (${esc(m.um)})</option>`).join("")}
+        </select>
+        <input type="number" id="bom_add_qty" step="any" min="0" placeholder="Cant/Lote" style="width:120px">
+        <button id="btn_bom_add" class="primary" style="padding:8px 14px;font-size:.86rem">Agregar</button>
+        <button id="btn_bom_newmat" class="btn-sm">+ Crear Insumo</button>
+      </div>
 
-  // Edición de parámetros del SKU
-  const saveSkuParams = () => {
-    sel.units_per_case = Math.max(1, num($("#sk_uc").value));
-    sel.net_weight_per_case = Math.max(0.001, num($("#sk_pw").value));
-    sel.batch_size_kg = Math.max(1, num($("#sk_bk").value));
-    sel.yield_pct = Math.max(1, Math.min(100, num($("#sk_yp").value)));
-    sel.batch_size_cases = (sel.batch_size_kg / sel.net_weight_per_case) * (sel.yield_pct / 100);
-    debounceSave("sku_" + sel.code, async () => {
-      const { error } = await sb.from("mrp_skus").update({
-        units_per_case: sel.units_per_case, net_weight_per_case: sel.net_weight_per_case,
-        batch_size_kg: sel.batch_size_kg, yield_pct: sel.yield_pct,
-        batch_size_cases: sel.batch_size_cases, updated_at: new Date().toISOString()
-      }).eq("code", sel.code);
-      if (error) throw error;
-    });
-    renderFormulas(v);
-  };
-  ["#sk_uc", "#sk_pw", "#sk_bk", "#sk_yp"].forEach(id => $(id).onchange = saveSkuParams);
+      <div class="tablebox"><table class="mrp-table">
+        <thead><tr><th>Código</th><th>Insumo</th><th>Tipo</th><th>UM</th><th class="num">Cant. / Lote</th><th class="num">Último Costo</th><th class="num">Subtotal Lote</th><th></th></tr></thead>
+        <tbody>
+          ${bom.map(it => {
+            const m = STATE.materials.get(it.mat_code);
+            if (!m) return "";
+            return `<tr data-mat="${esc(m.code)}">
+              <td><code>${esc(m.code)}</code></td>
+              <td><strong>${esc(m.name)}</strong></td>
+              <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+              <td>${esc(m.um)}</td>
+              <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-bqty value="${num(it.qty_per_batch)}"></td>
+              <td class="num">${fmtUsd(m.cost)}</td>
+              <td class="num"><strong>${fmtUsd(num(it.qty_per_batch) * num(m.cost))}</strong></td>
+              <td><button class="btn-sm btn-danger" data-brm="${esc(m.code)}">Quitar</button></td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:18px">Esta fórmula no tiene ingredientes cargados.</td></tr>`}
+        </tbody>
+      </table></div>`;
 
-  // Agregar ingrediente
-  $("#btn_bom_add").onclick = async () => {
-    const matCode = $("#bom_add_mat").value;
-    const qty = num($("#bom_add_qty").value);
-    if (!matCode || qty <= 0) return toast("Seleccione un insumo y escriba una cantidad > 0.", true);
-    const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
-    if (error) return toast(error.message, true);
-    if (!STATE.bom.has(sel.code)) STATE.bom.set(sel.code, []);
-    const arr = STATE.bom.get(sel.code);
-    const ex = arr.find(x => x.mat_code === matCode);
-    if (ex) ex.qty_per_batch = qty; else arr.push({ mat_code: matCode, qty_per_batch: qty });
-    toast("Ingrediente agregado.");
-    renderFormulas(v);
-  };
-
-  $("#btn_bom_newmat").onclick = () => openNewMaterialModal(() => renderFormulas(v));
-
-  v.querySelectorAll("input[data-bqty]").forEach(inp => {
-    inp.onchange = () => {
-      const matCode = inp.closest("tr").dataset.mat;
-      const qty = Math.max(0, num(inp.value));
-      const item = (STATE.bom.get(sel.code) || []).find(x => x.mat_code === matCode);
-      if (item) item.qty_per_batch = qty;
-      debounceSave(`bom_${sel.code}_${matCode}`, async () => {
-        const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
+    const saveSkuParams = () => {
+      sel.units_per_case = Math.max(1, num($("#sk_uc").value));
+      sel.net_weight_per_case = Math.max(0.001, num($("#sk_pw").value));
+      sel.batch_size_kg = Math.max(1, num($("#sk_bk").value));
+      sel.yield_pct = Math.max(1, Math.min(100, num($("#sk_yp").value)));
+      sel.batch_size_cases = (sel.batch_size_kg / sel.net_weight_per_case) * (sel.yield_pct / 100);
+      debounceSave("sku_" + sel.code, async () => {
+        const { error } = await sb.from("mrp_skus").update({
+          units_per_case: sel.units_per_case, net_weight_per_case: sel.net_weight_per_case,
+          batch_size_kg: sel.batch_size_kg, yield_pct: sel.yield_pct,
+          batch_size_cases: sel.batch_size_cases, updated_at: new Date().toISOString()
+        }).eq("code", sel.code);
         if (error) throw error;
       });
-      renderFormulas(v);
+      paintDetail();
     };
-  });
+    ["#sk_uc", "#sk_pw", "#sk_bk", "#sk_yp"].forEach(id => $(id).onchange = saveSkuParams);
 
-  v.querySelectorAll("[data-brm]").forEach(btn => {
-    btn.onclick = async () => {
-      const matCode = btn.dataset.brm;
-      const { error } = await sb.from("mrp_bom").delete().eq("sku_code", sel.code).eq("mat_code", matCode);
+    $("#btn_bom_add").onclick = async () => {
+      const matCode = $("#bom_add_mat").value;
+      const qty = num($("#bom_add_qty").value);
+      if (!matCode || qty <= 0) return toast("Seleccione un insumo y escriba una cantidad > 0.", true);
+      const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
       if (error) return toast(error.message, true);
-      STATE.bom.set(sel.code, (STATE.bom.get(sel.code) || []).filter(x => x.mat_code !== matCode));
-      renderFormulas(v);
+      if (!STATE.bom.has(sel.code)) STATE.bom.set(sel.code, []);
+      const arr = STATE.bom.get(sel.code);
+      const ex = arr.find(x => x.mat_code === matCode);
+      if (ex) ex.qty_per_batch = qty; else arr.push({ mat_code: matCode, qty_per_batch: qty });
+      toast("Ingrediente agregado.");
+      paintList();
+      paintDetail();
     };
-  });
 
-  $("#btn_dup_sku").onclick = () => openDuplicateSkuModal(sel);
-  $("#btn_del_sku").onclick = () => openDeleteSkuModal(sel);
+    $("#btn_bom_newmat").onclick = () => openNewMaterialModal(() => paintDetail());
+
+    det.querySelectorAll("input[data-bqty]").forEach(inp => {
+      inp.onchange = () => {
+        const matCode = inp.closest("tr").dataset.mat;
+        const qty = Math.max(0, num(inp.value));
+        const item = (STATE.bom.get(sel.code) || []).find(x => x.mat_code === matCode);
+        if (item) item.qty_per_batch = qty;
+        debounceSave(`bom_${sel.code}_${matCode}`, async () => {
+          const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
+          if (error) throw error;
+        });
+        paintDetail();
+      };
+    });
+
+    det.querySelectorAll("[data-brm]").forEach(btn => {
+      btn.onclick = async () => {
+        const matCode = btn.dataset.brm;
+        const { error } = await sb.from("mrp_bom").delete().eq("sku_code", sel.code).eq("mat_code", matCode);
+        if (error) return toast(error.message, true);
+        STATE.bom.set(sel.code, (STATE.bom.get(sel.code) || []).filter(x => x.mat_code !== matCode));
+        paintList();
+        paintDetail();
+      };
+    });
+
+    $("#btn_dup_sku").onclick = () => openDuplicateSkuModal(sel);
+    $("#btn_del_sku").onclick = () => openDeleteSkuModal(sel);
+  };
+
+  paintList();
+  paintDetail();
+  $("#fb_q").oninput = e => { STATE.fBom.q = e.target.value; paintList(); };
+  $("#fb_cat").onchange = e => { STATE.fBom.cat = e.target.value; paintList(); };
+  $("#btn_new_sku").onclick = () => openNewSkuModal();
 }
 
 function openNewSkuModal() {
@@ -1338,7 +1764,6 @@ $("#inp_xlsx").onchange = async e => {
       throw new Error("No se encontraron hojas reconocidas (ANALISIS / PLAN MES / F.* o exportación MRP).");
     }
 
-    // Guardar en Supabase por lotes respetando llaves foráneas
     await batchUpsert("mrp_materiales", parsed.materials, "code");
     await batchUpsert("mrp_skus", parsed.skus, "code");
     if (parsed.bom.length) await batchUpsert("mrp_bom", parsed.bom, "sku_code,mat_code");
@@ -1371,13 +1796,8 @@ function cleanNum(v) {
 }
 
 function parseOriginalExcel(wb) {
-  const matMap = new Map();
-  const skuMap = new Map();
-  const bomMap = new Map();
-  const planMap = new Map();
-  const compMap = new Map();
+  const matMap = new Map(), skuMap = new Map(), bomMap = new Map(), planMap = new Map(), compMap = new Map();
 
-  // 1. ANALISIS
   if (wb.SheetNames.includes("ANALISIS")) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets["ANALISIS"], { header: 1, defval: null });
     for (let i = 3; i < rows.length; i++) {
@@ -1399,7 +1819,6 @@ function parseOriginalExcel(wb) {
     }
   }
 
-  // 2. INVENTARIO
   if (wb.SheetNames.includes("INVENTARIO")) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets["INVENTARIO"], { header: 1, defval: null });
     for (let i = 4; i < rows.length; i++) {
@@ -1409,7 +1828,6 @@ function parseOriginalExcel(wb) {
     }
   }
 
-  // 3. AGREGAR COSTOS
   if (wb.SheetNames.includes("AGREGAR COSTOS")) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets["AGREGAR COSTOS"], { header: 1, defval: null });
     for (let i = 5; i < rows.length; i++) {
@@ -1423,7 +1841,6 @@ function parseOriginalExcel(wb) {
     }
   }
 
-  // 4. Hojas F.* (Fórmulas)
   for (const sName of wb.SheetNames) {
     if (!sName.startsWith("F.") || sName.includes("Despulpado") || sName.includes("Base")) continue;
     const cat = sName.replace(/^F\.\s*/i, "").trim().toUpperCase();
@@ -1455,7 +1872,6 @@ function parseOriginalExcel(wb) {
     }
   }
 
-  // 5. PLAN MES
   if (wb.SheetNames.includes("PLAN MES")) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets["PLAN MES"], { header: 1, defval: null });
     for (let i = 6; i < rows.length; i++) {
@@ -1525,7 +1941,7 @@ function parseAppExport(wb) {
   return { materials: [...matMap.values()], skus: [...skuMap.values()], bom: [...bomMap.values()], planItems: [...planMap.values()], compras: [...compMap.values()] };
 }
 
-// -------------------- EXPORTACIÓN EXCEL (.XLSX) DE 6 HOJAS --------------------
+// -------------------- EXPORTACIÓN COMPLETA EXCEL (.XLSX) DE 6 HOJAS --------------------
 $("#btn_export").onclick = () => {
   const mrp = computeMrp();
   const wb = XLSX.utils.book_new();

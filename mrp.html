@@ -114,6 +114,12 @@
     padding: 6px 10px; border-radius: 8px; width: auto; font-weight: 600;
   }
   .plan-bar select option { color: #0B1033; background: #fff; }
+  .icon-edit {
+    border: none; background: transparent; color: var(--muted);
+    padding: 2px 5px; font-size: .82rem; border-radius: 5px; cursor: pointer;
+    vertical-align: middle; margin-left: 4px;
+  }
+  .icon-edit:hover { background: var(--bg); color: var(--brand); }
 </style>
 </head>
 <body>
@@ -192,6 +198,9 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="./config.js" charset="utf-8"></script>
 <script>
