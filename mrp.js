@@ -1,0 +1,1590 @@
+/* ============================================================================
+ * MRP PRO · ALIMENTOS MIDA (QUIDY)
+ * Integrado con Supabase Auth + Postgres + Proveedores Aprobados
+ * ============================================================================ */
+
+const sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const fmt = (v, d = 2) => num(v).toLocaleString("es-VE", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtUsd = v => "$" + fmt(v, 2);
+
+const STATE = {
+  tab: "dashboard",
+  planes: [],
+  activePlanId: null,
+  materials: new Map(),   // code -> obj
+  skus: new Map(),        // code -> obj
+  bom: new Map(),         // sku_code -> [{ mat_code, qty_per_batch }]
+  planItems: new Map(),   // sku_code -> { forecast, plan_qty, w1..w5 }
+  compras: new Map(),     // mat_code -> { decision_qty, provider, oc, w1..w5 }
+  proveedores: [],        // nombres de proveedores aprobados
+  selectedSku: null,
+  // Filtros UI persistentes en sesión
+  fPlan: { q: "", cat: "" },
+  fAnalisis: { q: "", type: "", onlyActive: true, showAdv: false },
+  fProcura: { q: "", onlyActive: true },
+  fCatalogo: { q: "", type: "" },
+  fCostos: { q: "", type: "", onlyZero: false },
+  fBom: { q: "", cat: "" },
+  charts: {}
+};
+
+// -------------------- UTILIDADES UI & SYNC --------------------
+function toast(msg, isErr = false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (isErr ? " err" : "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 3800);
+}
+
+let pendingSaves = 0;
+function setSync(state, label) {
+  const pill = $("#sync_pill");
+  if (!pill) return;
+  pill.className = "sync-pill" + (state === "saving" ? " saving" : state === "err" ? " err" : "");
+  pill.textContent = label || (state === "saving" ? "Guardando…" : state === "err" ? "Error al guardar" : "Sincronizado ✓");
+}
+
+const timers = new Map();
+function debounceSave(key, fn, delay = 450) {
+  clearTimeout(timers.get(key));
+  setSync("saving");
+  timers.set(key, setTimeout(async () => {
+    pendingSaves++;
+    try {
+      await fn();
+      pendingSaves = Math.max(0, pendingSaves - 1);
+      if (pendingSaves === 0) setSync("ok");
+    } catch (err) {
+      pendingSaves = Math.max(0, pendingSaves - 1);
+      console.error("Supabase save error:", err);
+      setSync("err");
+      toast("Error guardando en Supabase: " + (err.message || err), true);
+    }
+  }, delay));
+}
+
+async function batchUpsert(table, rows, onConflict) {
+  if (!rows.length) return;
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    const opts = onConflict ? { onConflict } : {};
+    const { error } = await sb.from(table).upsert(chunk, opts);
+    if (error) throw error;
+  }
+}
+
+// -------------------- AUTENTICACIÓN COMPARTIDA --------------------
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  $("#login").hidden = !!session;
+  $("#app").hidden = !session;
+  $("#admin_nav").hidden = !session;
+  if (session) await loadAll();
+}
+
+$("#lf").onsubmit = async e => {
+  e.preventDefault();
+  $("#lerr").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email: $("#em").value, password: $("#pw").value });
+  if (error) $("#lerr").textContent = "Correo o contraseña incorrectos.";
+  else boot();
+};
+
+$("#btn_out").onclick = async () => { await sb.auth.signOut(); boot(); };
+
+// -------------------- CARGA INICIAL DESDE SUPABASE --------------------
+async function loadAll() {
+  setSync("saving", "Cargando datos…");
+  try {
+    const [rPlanes, rMats, rSkus, rBom, rProv] = await Promise.all([
+      sb.from("mrp_planes").select("*").order("created_at", { ascending: false }),
+      sb.from("mrp_materiales").select("*").order("code"),
+      sb.from("mrp_skus").select("*").order("category").order("name"),
+      sb.from("mrp_bom").select("*"),
+      sb.from("proveedores").select("razon_social,nombre_comercial,estatus").eq("estatus", "aprobado").order("razon_social")
+    ]);
+    for (const r of [rPlanes, rMats, rSkus, rBom]) {
+      if (r.error) throw r.error;
+    }
+
+    STATE.planes = rPlanes.data || [];
+    if (!STATE.planes.length) {
+      const { data: created, error } = await sb.from("mrp_planes").insert({
+        name: "Planificación " + new Date().toISOString().slice(0, 7),
+        is_active: true
+      }).select().single();
+      if (error) throw error;
+      STATE.planes = [created];
+    }
+
+    if (!STATE.activePlanId || !STATE.planes.some(p => p.id === STATE.activePlanId)) {
+      const act = STATE.planes.find(p => p.is_active) || STATE.planes[0];
+      STATE.activePlanId = act.id;
+    }
+
+    STATE.materials.clear();
+    (rMats.data || []).forEach(m => STATE.materials.set(m.code, m));
+
+    STATE.skus.clear();
+    (rSkus.data || []).forEach(s => STATE.skus.set(s.code, s));
+
+    STATE.bom.clear();
+    (rBom.data || []).forEach(b => {
+      if (!STATE.bom.has(b.sku_code)) STATE.bom.set(b.sku_code, []);
+      STATE.bom.get(b.sku_code).push({ id: b.id, mat_code: b.mat_code, qty_per_batch: num(b.qty_per_batch) });
+    });
+
+    STATE.proveedores = (rProv.data || []).map(p => p.nombre_comercial ? `${p.razon_social} (${p.nombre_comercial})` : p.razon_social);
+    $("#dl_proveedores").innerHTML = STATE.proveedores.map(p => `<option value="${esc(p)}"></option>`).join("");
+
+    renderPlanSelector();
+    await loadPlanData(STATE.activePlanId);
+    setSync("ok");
+  } catch (err) {
+    console.error(err);
+    setSync("err", "Error de conexión");
+    $("#view").innerHTML = `<div class="panel-card"><h3 style="color:var(--danger)">No se pudieron cargar las tablas MRP</h3>
+      <p>Verifique que ejecutó <code>supabase_mrp.sql</code> en el SQL Editor de Supabase.</p>
+      <p class="hint">Detalle: ${esc(err.message || err)}</p></div>`;
+  }
+}
+
+async function loadPlanData(planId) {
+  const [rItems, rComp] = await Promise.all([
+    sb.from("mrp_plan_items").select("*").eq("plan_id", planId),
+    sb.from("mrp_compras").select("*").eq("plan_id", planId)
+  ]);
+  if (rItems.error) throw rItems.error;
+  if (rComp.error) throw rComp.error;
+
+  STATE.planItems.clear();
+  (rItems.data || []).forEach(it => STATE.planItems.set(it.sku_code, it));
+
+  STATE.compras.clear();
+  (rComp.data || []).forEach(c => STATE.compras.set(c.mat_code, c));
+
+  if (!STATE.selectedSku && STATE.skus.size) STATE.selectedSku = [...STATE.skus.keys()][0];
+  renderView();
+}
+
+function renderPlanSelector() {
+  const sel = $("#plan_sel");
+  sel.innerHTML = STATE.planes.map(p => `<option value="${p.id}" ${p.id === STATE.activePlanId ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  sel.onchange = async () => {
+    STATE.activePlanId = sel.value;
+    setSync("saving", "Cambiando plan…");
+    await loadPlanData(STATE.activePlanId);
+    setSync("ok");
+  };
+}
+
+// -------------------- MOTOR DE CÁLCULO MRP --------------------
+function getPlanItem(skuCode) {
+  return STATE.planItems.get(skuCode) || { forecast: 0, plan_qty: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0 };
+}
+
+function getCompra(matCode) {
+  return STATE.compras.get(matCode) || { decision_qty: 0, provider: "", oc: "", w1: 0, w2: 0, w3: 0, w4: 0, w5: 0 };
+}
+
+function calcSuggestedPurchase(consumo, stock, safetyPct, moq, rounding) {
+  if (consumo <= 0) return { rawReq: 0, suggested: 0 };
+  const target = consumo * (1 + Math.max(0, safetyPct));
+  const rawReq = Math.max(0, target - stock);
+  if (rawReq <= 0) return { rawReq: 0, suggested: 0 };
+  const m = Math.max(0, moq);
+  const r = rounding > 0 ? rounding : 1;
+  let suggested = rawReq;
+  if (m > 0 && rawReq <= m) suggested = m;
+  else if (m > 0) suggested = m + Math.ceil((rawReq - m) / r) * r;
+  else suggested = Math.ceil(rawReq / r) * r;
+  return { rawReq, suggested };
+}
+
+function computeMrp() {
+  const consumption = new Map(); // mat_code -> { total, w1..w5, byCat: Map(cat -> qty) }
+  const ensureCons = code => {
+    if (!consumption.has(code)) consumption.set(code, { total: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, byCat: new Map() });
+    return consumption.get(code);
+  };
+
+  let totalCases = 0;
+  const catCases = new Map();
+
+  for (const [skuCode, sku] of STATE.skus.entries()) {
+    const pi = getPlanItem(skuCode);
+    const pQty = num(pi.plan_qty);
+    totalCases += pQty;
+    catCases.set(sku.category, (catCases.get(sku.category) || 0) + pQty);
+
+    const bCases = num(sku.batch_size_cases) > 0 ? num(sku.batch_size_cases) : 1;
+    const bomList = STATE.bom.get(skuCode) || [];
+    if (!bomList.length) continue;
+
+    const batchesTotal = pQty / bCases;
+    const bw1 = num(pi.w1) / bCases, bw2 = num(pi.w2) / bCases, bw3 = num(pi.w3) / bCases, bw4 = num(pi.w4) / bCases, bw5 = num(pi.w5) / bCases;
+
+    for (const item of bomList) {
+      const q = num(item.qty_per_batch);
+      if (q <= 0) continue;
+      const c = ensureCons(item.mat_code);
+      const addTot = batchesTotal * q;
+      c.total += addTot;
+      c.w1 += bw1 * q; c.w2 += bw2 * q; c.w3 += bw3 * q; c.w4 += bw4 * q; c.w5 += bw5 * q;
+      if (addTot > 0) c.byCat.set(sku.category, (c.byCat.get(sku.category) || 0) + addTot);
+    }
+  }
+
+  const rows = [];
+  let totalInvUsd = 0, totalMpUsd = 0, totalMeUsd = 0, deficitCount = 0, noCostCount = 0;
+  const weeklyUsd = [0, 0, 0, 0, 0];
+  const catInv = new Map(); // cat -> { mp: 0, me: 0 }
+
+  for (const [code, m] of STATE.materials.entries()) {
+    const c = consumption.get(code) || { total: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, byCat: new Map() };
+    const comp = getCompra(code);
+    const stock = num(m.stock);
+    const cost = num(m.cost);
+    const diff = stock - c.total;
+    const covInit = c.total > 0 ? stock / c.total : 0;
+    const { rawReq, suggested } = calcSuggestedPurchase(c.total, stock, num(m.safety_pct), num(m.moq), num(m.rounding));
+    const decision = num(comp.decision_qty);
+    const stockFinal = stock - c.total + decision;
+    const covFinal = c.total > 0 ? stockFinal / c.total : 0;
+    const invUsd = decision * cost;
+
+    totalInvUsd += invUsd;
+    if (m.type === "MP") totalMpUsd += invUsd; else totalMeUsd += invUsd;
+    if (stockFinal < -1e-6) deficitCount++;
+    if ((c.total > 0 || decision > 0) && cost <= 0) noCostCount++;
+
+    weeklyUsd[0] += num(comp.w1) * cost;
+    weeklyUsd[1] += num(comp.w2) * cost;
+    weeklyUsd[2] += num(comp.w3) * cost;
+    weeklyUsd[3] += num(comp.w4) * cost;
+    weeklyUsd[4] += num(comp.w5) * cost;
+
+    if (invUsd > 0 && c.total > 0) {
+      for (const [cat, qtyCat] of c.byCat.entries()) {
+        const share = qtyCat / c.total;
+        if (!catInv.has(cat)) catInv.set(cat, { mp: 0, me: 0 });
+        if (m.type === "MP") catInv.get(cat).mp += invUsd * share;
+        else catInv.get(cat).me += invUsd * share;
+      }
+    }
+
+    rows.push({
+      m, c, comp, stock, cost, diff, covInit, rawReq, suggested,
+      decision, stockFinal, covFinal, invUsd,
+      hasDeficit: stockFinal < -1e-6,
+      noCost: (c.total > 0 || decision > 0) && cost <= 0
+    });
+  }
+
+  return { rows, totalCases, totalInvUsd, totalMpUsd, totalMeUsd, deficitCount, noCostCount, weeklyUsd, catInv, catCases };
+}
+
+function skuCostBreakdown(skuCode) {
+  const sku = STATE.skus.get(skuCode);
+  const bom = STATE.bom.get(skuCode) || [];
+  let mp = 0, me = 0, kgSum = 0;
+  for (const item of bom) {
+    const m = STATE.materials.get(item.mat_code);
+    if (!m) continue;
+    const q = num(item.qty_per_batch);
+    const c = num(m.cost) * q;
+    if (m.type === "MP") {
+      mp += c;
+      if (["kg", "l", "lt", "lts"].includes(String(m.um || "").toLowerCase())) kgSum += q;
+    } else {
+      me += c;
+    }
+  }
+  const total = mp + me;
+  const bCases = num(sku?.batch_size_cases) > 0 ? num(sku.batch_size_cases) : 1;
+  const uCase = num(sku?.units_per_case) > 0 ? num(sku.units_per_case) : 1;
+  return { mp, me, total, perCase: total / bCases, perUnit: total / (bCases * uCase), kgSum };
+}
+
+// -------------------- NAVEGACIÓN DE PESTAÑAS --------------------
+$("#tabs").onclick = e => {
+  const btn = e.target.closest("[data-tab]");
+  if (!btn) return;
+  STATE.tab = btn.dataset.tab;
+  document.querySelectorAll(".mrp-tab").forEach(b => b.classList.toggle("active", b.dataset.tab === STATE.tab));
+  renderView();
+};
+
+function renderView() {
+  Object.values(STATE.charts).forEach(ch => ch?.destroy?.());
+  STATE.charts = {};
+  const v = $("#view");
+  if (STATE.tab === "dashboard") renderDashboard(v);
+  else if (STATE.tab === "plan") renderPlan(v);
+  else if (STATE.tab === "analisis") renderAnalisis(v);
+  else if (STATE.tab === "procura") renderProcura(v);
+  else if (STATE.tab === "catalogo") renderCatalogo(v);
+  else if (STATE.tab === "costos") renderCostos(v);
+  else if (STATE.tab === "formulas") renderFormulas(v);
+}
+
+// -------------------- 1. DASHBOARD --------------------
+function renderDashboard(v) {
+  if (!STATE.skus.size && !STATE.materials.size) {
+    v.innerHTML = `<div class="empty-hero">
+      <h2>Comience su Planificación MRP</h2>
+      <p class="hint" style="max-width:540px;margin:0 auto 20px">La base de datos está lista y vacía. Puede importar directamente su archivo <strong>planificacion 1.1.xlsx</strong> para cargar todas las fórmulas, insumos y costos en Supabase, o empezar creando su primera fórmula.</p>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+        <button class="primary" onclick="document.getElementById('inp_xlsx').click()">Importar planificacion 1.1.xlsx</button>
+        <button onclick="STATE.tab='formulas';document.querySelector('[data-tab=formulas]').click()">Crear Primera Fórmula</button>
+      </div>
+    </div>`;
+    return;
+  }
+
+  const mrp = computeMrp();
+  v.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Inversión Total Plan</div>
+        <div class="kpi-val">${fmtUsd(mrp.totalInvUsd)}</div>
+        <div class="kpi-sub">MP: ${fmtUsd(mrp.totalMpUsd)} · ME: ${fmtUsd(mrp.totalMeUsd)}</div>
+      </div>
+      <div class="kpi-card accent">
+        <div class="kpi-label">Volumen Planificado</div>
+        <div class="kpi-val">${fmt(mrp.totalCases, 0)} cj</div>
+        <div class="kpi-sub">${STATE.skus.size} SKUs · ${STATE.materials.size} insumos</div>
+      </div>
+      <div class="kpi-card ${mrp.deficitCount ? "warn" : "ok"}">
+        <div class="kpi-label">Insumos en Déficit</div>
+        <div class="kpi-val">${mrp.deficitCount}</div>
+        <div class="kpi-sub">${mrp.deficitCount ? "Stock final negativo tras consumo" : "Cobertura completa ✓"}</div>
+      </div>
+      <div class="kpi-card ${mrp.noCostCount ? "warn" : "ok"}">
+        <div class="kpi-label">Insumos Sin Costo ($0)</div>
+        <div class="kpi-val">${mrp.noCostCount}</div>
+        <div class="kpi-sub">${mrp.noCostCount ? "Actualizar en pestaña Costos" : "Todos los activos valorizados ✓"}</div>
+      </div>
+    </div>
+    <div class="charts-grid">
+      <div class="panel-card">
+        <h3>Inversión por Categoría (MP vs ME)</h3>
+        <canvas id="ch_cat" height="210"></canvas>
+      </div>
+      <div class="panel-card">
+        <h3>Flujo de Compras Semanal (S1 – S5)</h3>
+        <canvas id="ch_sem" height="210"></canvas>
+      </div>
+    </div>
+    <div class="panel-card">
+      <h3>Top 10 Insumos por Inversión Requerida</h3>
+      <div class="tablebox"><table class="mrp-table">
+        <thead><tr><th>Código</th><th>Insumo</th><th>Tipo</th><th class="num">Consumo</th><th class="num">Stock</th><th class="num">Decisión</th><th class="num">Último Costo</th><th class="num">Inversión USD</th></tr></thead>
+        <tbody>
+          ${mrp.rows.filter(r => r.invUsd > 0).sort((a, b) => b.invUsd - a.invUsd).slice(0, 10).map(r => `
+            <tr>
+              <td><code>${esc(r.m.code)}</code></td>
+              <td><strong>${esc(r.m.name)}</strong></td>
+              <td><span class="badge ${r.m.type === "MP" ? "mp" : "me"}">${r.m.type}</span></td>
+              <td class="num">${fmt(r.c.total)} ${esc(r.m.um)}</td>
+              <td class="num">${fmt(r.stock)}</td>
+              <td class="num"><strong>${fmt(r.decision)}</strong></td>
+              <td class="num">${fmtUsd(r.cost)}</td>
+              <td class="num"><strong>${fmtUsd(r.invUsd)}</strong></td>
+            </tr>`).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:18px">Aún no hay decisiones de compra registradas para este plan.</td></tr>`}
+        </tbody>
+      </table></div>
+    </div>`;
+
+  const cats = [...mrp.catInv.keys()];
+  STATE.charts.cat = new Chart($("#ch_cat"), {
+    type: "bar",
+    data: {
+      labels: cats.length ? cats : ["Sin datos"],
+      datasets: [
+        { label: "Materia Prima (MP)", data: cats.length ? cats.map(c => mrp.catInv.get(c).mp) : [0], backgroundColor: "#011487" },
+        { label: "Material Empaque (ME)", data: cats.length ? cats.map(c => mrp.catInv.get(c).me) : [0], backgroundColor: "#FFCB05" }
+      ]
+    },
+    options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true } } }
+  });
+
+  STATE.charts.sem = new Chart($("#ch_sem"), {
+    type: "bar",
+    data: {
+      labels: ["Sem 01", "Sem 02", "Sem 03", "Sem 04", "Sem 05"],
+      datasets: [{ label: "Inversión Semanal (USD)", data: mrp.weeklyUsd, backgroundColor: "#011487", borderRadius: 6 }]
+    },
+    options: { responsive: true }
+  });
+}
+
+// -------------------- 2. PLAN DE PRODUCCIÓN --------------------
+function renderPlan(v) {
+  const cats = [...new Set([...STATE.skus.values()].map(s => s.category))].sort();
+  const q = STATE.fPlan.q.toLowerCase();
+  const list = [...STATE.skus.values()].filter(s =>
+    (!STATE.fPlan.cat || s.category === STATE.fPlan.cat) &&
+    (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q))
+  );
+
+  v.innerHTML = `
+    <div class="bar">
+      <input type="search" id="fp_q" placeholder="Buscar SKU o código…" value="${esc(STATE.fPlan.q)}">
+      <select id="fp_cat"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === STATE.fPlan.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+      <button id="btn_prorratear_all">Prorratear todo en 4 semanas</button>
+    </div>
+    <div class="tablebox"><table class="mrp-table">
+      <thead><tr>
+        <th>Código</th><th>Producto Terminado (SKU)</th><th>Categoría</th>
+        <th class="num">Forecast</th><th class="num">Plan Mes (Cj)</th>
+        <th class="num">Sem 1</th><th class="num">Sem 2</th><th class="num">Sem 3</th><th class="num">Sem 4</th><th class="num">Sem 5</th>
+        <th>Check</th><th></th>
+      </tr></thead>
+      <tbody>
+        ${list.map(s => {
+          const pi = getPlanItem(s.code);
+          const sumW = num(pi.w1) + num(pi.w2) + num(pi.w3) + num(pi.w4) + num(pi.w5);
+          const ok = Math.abs(sumW - num(pi.plan_qty)) < 0.01;
+          return `<tr data-sku="${esc(s.code)}">
+            <td><code>${esc(s.code)}</code></td>
+            <td><strong>${esc(s.name)}</strong><div class="hint">${fmt(s.net_weight_per_case, 2)} kg/cj · Lote ${fmt(s.batch_size_cases, 1)} cj</div></td>
+            <td>${esc(s.category)}</td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="forecast" value="${num(pi.forecast)}"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="plan_qty" value="${num(pi.plan_qty)}" style="border-color:var(--brand)"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w1" value="${num(pi.w1)}"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w2" value="${num(pi.w2)}"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w3" value="${num(pi.w3)}"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w4" value="${num(pi.w4)}"></td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-f="w5" value="${num(pi.w5)}"></td>
+            <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
+            <td><button class="btn-sm" data-pror="${esc(s.code)}" title="Dividir Plan Mes entre 4 semanas">÷4</button></td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="12" class="hint" style="text-align:center;padding:20px">No hay SKUs que coincidan.</td></tr>`}
+      </tbody>
+    </table></div>`;
+
+  $("#fp_q").oninput = e => { STATE.fPlan.q = e.target.value; renderPlan(v); };
+  $("#fp_cat").onchange = e => { STATE.fPlan.cat = e.target.value; renderPlan(v); };
+
+  v.querySelectorAll("input[data-f]").forEach(inp => {
+    inp.onchange = () => {
+      const skuCode = inp.closest("tr").dataset.sku;
+      const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
+      cur[inp.dataset.f] = Math.max(0, num(inp.value));
+      STATE.planItems.set(skuCode, cur);
+      savePlanItem(cur);
+      renderPlan(v);
+    };
+  });
+
+  v.querySelectorAll("[data-pror]").forEach(btn => {
+    btn.onclick = () => {
+      const skuCode = btn.dataset.pror;
+      const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
+      const q4 = Math.round((num(cur.plan_qty) / 4) * 100) / 100;
+      const rem = Math.round((num(cur.plan_qty) - q4 * 3) * 100) / 100;
+      cur.w1 = q4; cur.w2 = q4; cur.w3 = q4; cur.w4 = Math.max(0, rem); cur.w5 = 0;
+      STATE.planItems.set(skuCode, cur);
+      savePlanItem(cur);
+      renderPlan(v);
+    };
+  });
+
+  $("#btn_prorratear_all").onclick = async () => {
+    const updates = [];
+    for (const [skuCode] of STATE.skus.entries()) {
+      const cur = { ...getPlanItem(skuCode), plan_id: STATE.activePlanId, sku_code: skuCode };
+      if (num(cur.plan_qty) <= 0) continue;
+      const q4 = Math.round((num(cur.plan_qty) / 4) * 100) / 100;
+      const rem = Math.round((num(cur.plan_qty) - q4 * 3) * 100) / 100;
+      cur.w1 = q4; cur.w2 = q4; cur.w3 = q4; cur.w4 = Math.max(0, rem); cur.w5 = 0;
+      STATE.planItems.set(skuCode, cur);
+      updates.push({ plan_id: cur.plan_id, sku_code: cur.sku_code, forecast: num(cur.forecast), plan_qty: num(cur.plan_qty), w1: cur.w1, w2: cur.w2, w3: cur.w3, w4: cur.w4, w5: 0 });
+    }
+    if (!updates.length) return toast("No hay SKUs con Plan Mes > 0.");
+    setSync("saving");
+    try {
+      await batchUpsert("mrp_plan_items", updates, "plan_id,sku_code");
+      setSync("ok");
+      toast(`Prorrateados ${updates.length} SKUs en 4 semanas.`);
+      renderPlan(v);
+    } catch (e) { setSync("err"); toast(e.message, true); }
+  };
+}
+
+function savePlanItem(it) {
+  const payload = {
+    plan_id: STATE.activePlanId, sku_code: it.sku_code,
+    forecast: num(it.forecast), plan_qty: num(it.plan_qty),
+    w1: num(it.w1), w2: num(it.w2), w3: num(it.w3), w4: num(it.w4), w5: num(it.w5)
+  };
+  debounceSave("pi_" + it.sku_code, async () => {
+    const { error } = await sb.from("mrp_plan_items").upsert(payload, { onConflict: "plan_id,sku_code" });
+    if (error) throw error;
+  });
+}
+
+// -------------------- 3. ANÁLISIS MRP (ESENCIAL + AVANZADO OPCIONAL) --------------------
+function renderAnalisis(v) {
+  const mrp = computeMrp();
+  const q = STATE.fAnalisis.q.toLowerCase();
+  const rows = mrp.rows.filter(r =>
+    (!STATE.fAnalisis.type || r.m.type === STATE.fAnalisis.type) &&
+    (!STATE.fAnalisis.onlyActive || r.c.total > 0 || r.hasDeficit || r.decision > 0) &&
+    (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
+  );
+
+  v.innerHTML = `
+    <div class="bar">
+      <input type="search" id="fa_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fAnalisis.q)}">
+      <select id="fa_type">
+        <option value="">MP y ME</option>
+        <option value="MP" ${STATE.fAnalisis.type === "MP" ? "selected" : ""}>Solo MP</option>
+        <option value="ME" ${STATE.fAnalisis.type === "ME" ? "selected" : ""}>Solo ME</option>
+      </select>
+      <label class="toggle-lbl"><input type="checkbox" id="fa_act" ${STATE.fAnalisis.onlyActive ? "checked" : ""}> Solo con consumo o déficit</label>
+      <label class="toggle-lbl"><input type="checkbox" id="fa_adv" ${STATE.fAnalisis.showAdv ? "checked" : ""}> Mostrar columnas avanzadas</label>
+      <button id="btn_copy_prop" class="primary" style="padding:8px 14px;font-size:.86rem">Aplicar Propuesta Sugerida</button>
+    </div>
+    <div class="tablebox ${STATE.fAnalisis.showAdv ? "show-adv" : ""}"><table class="mrp-table">
+      <thead><tr>
+        <th>Insumo</th>
+        <th class="adv-col num">Lead (d)</th>
+        <th class="adv-col num">MOQ</th>
+        <th class="adv-col num">Red.</th>
+        <th class="adv-col num">% SS</th>
+        <th class="num">Stock Disp.</th>
+        <th class="num">Consumo</th>
+        <th class="adv-col num">Cob. Ini</th>
+        <th class="num">Diferencia</th>
+        <th class="num">Propuesta</th>
+        <th class="num">Decisión Compra</th>
+        <th class="adv-col">Proveedor</th>
+        <th class="adv-col">N° O/C</th>
+        <th class="adv-col num">Stock Final</th>
+        <th class="adv-col num">Cob. Fin</th>
+        <th class="num">Inversión USD</th>
+        <th>Estado</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(r => {
+          const badge = r.noCost
+            ? `<span class="badge nocost">SIN COSTO</span>`
+            : r.hasDeficit
+              ? `<span class="badge deficit">DÉFICIT</span>`
+              : `<span class="badge ok">OK</span>`;
+          return `<tr data-mat="${esc(r.m.code)}">
+            <td><strong>${esc(r.m.name)}</strong><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)} · <span class="badge ${r.m.type === "MP" ? "mp" : "me"}">${r.m.type}</span></div></td>
+            <td class="adv-col num">${num(r.m.lead_time)}</td>
+            <td class="adv-col num">${fmt(r.m.moq, 0)}</td>
+            <td class="adv-col num">${fmt(r.m.rounding, 0)}</td>
+            <td class="adv-col num">${fmt(num(r.m.safety_pct) * 100, 0)}%</td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-stock value="${r.stock}"></td>
+            <td class="num">${fmt(r.c.total)}</td>
+            <td class="adv-col num">${fmt(r.covInit * 100, 0)}%</td>
+            <td class="num" style="color:${r.diff < 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${fmt(r.diff)}</td>
+            <td class="num" style="font-weight:700;color:var(--brand)">${fmt(r.suggested)}</td>
+            <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-dec value="${r.decision}" style="border-color:var(--brand)"></td>
+            <td class="adv-col"><input class="cell-inp wide" type="text" list="dl_proveedores" placeholder="Seleccionar…" data-prov value="${esc(r.comp.provider || "")}"></td>
+            <td class="adv-col"><input class="cell-inp" type="text" style="text-align:left;width:90px" placeholder="OC-" data-oc value="${esc(r.comp.oc || "")}"></td>
+            <td class="adv-col num" style="color:${r.stockFinal < 0 ? "var(--danger)" : "inherit"}">${fmt(r.stockFinal)}</td>
+            <td class="adv-col num">${fmt(r.covFinal * 100, 0)}%</td>
+            <td class="num" title="Costo unitario: ${fmtUsd(r.cost)} (editar en pestaña Costos)"><strong>${fmtUsd(r.invUsd)}</strong></td>
+            <td>${badge}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="17" class="hint" style="text-align:center;padding:22px">Sin insumos activos. Cargue cantidades en <strong>Plan de Producción</strong> o desactive el filtro.</td></tr>`}
+      </tbody>
+    </table></div>
+    <p class="hint" style="margin-top:8px">Mostrando ${rows.length} insumos · Inversión total del plan: <strong>${fmtUsd(mrp.totalInvUsd)}</strong>. Los costos unitarios se gestionan únicamente en la pestaña <strong>Costos de Compra</strong>.</p>`;
+
+  $("#fa_q").oninput = e => { STATE.fAnalisis.q = e.target.value; renderAnalisis(v); };
+  $("#fa_type").onchange = e => { STATE.fAnalisis.type = e.target.value; renderAnalisis(v); };
+  $("#fa_act").onchange = e => { STATE.fAnalisis.onlyActive = e.target.checked; renderAnalisis(v); };
+  $("#fa_adv").onchange = e => { STATE.fAnalisis.showAdv = e.target.checked; renderAnalisis(v); };
+
+  v.querySelectorAll("input[data-stock]").forEach(inp => {
+    inp.onchange = () => {
+      const code = inp.closest("tr").dataset.mat;
+      const m = STATE.materials.get(code);
+      m.stock = Math.max(0, num(inp.value));
+      debounceSave("st_" + code, async () => {
+        const { error } = await sb.from("mrp_materiales").update({ stock: m.stock, updated_at: new Date().toISOString() }).eq("code", code);
+        if (error) throw error;
+      });
+      renderAnalisis(v);
+    };
+  });
+
+  const onCompraEdit = (tr, field, val) => {
+    const code = tr.dataset.mat;
+    const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
+    cur[field] = val;
+    STATE.compras.set(code, cur);
+    saveCompra(cur);
+    if (field === "decision_qty") renderAnalisis(v);
+  };
+
+  v.querySelectorAll("input[data-dec]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "decision_qty", Math.max(0, num(inp.value))));
+  v.querySelectorAll("input[data-prov]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "provider", inp.value.trim()));
+  v.querySelectorAll("input[data-oc]").forEach(inp => inp.onchange = () => onCompraEdit(inp.closest("tr"), "oc", inp.value.trim()));
+
+  $("#btn_copy_prop").onclick = async () => {
+    const updates = [];
+    for (const r of rows) {
+      if (r.suggested <= 0) continue;
+      const cur = { ...getCompra(r.m.code), plan_id: STATE.activePlanId, mat_code: r.m.code, decision_qty: r.suggested };
+      STATE.compras.set(r.m.code, cur);
+      updates.push({
+        plan_id: STATE.activePlanId, mat_code: r.m.code, decision_qty: cur.decision_qty,
+        provider: cur.provider || "", oc: cur.oc || "",
+        w1: num(cur.w1), w2: num(cur.w2), w3: num(cur.w3), w4: num(cur.w4), w5: num(cur.w5)
+      });
+    }
+    if (!updates.length) return toast("No hay propuestas > 0 para aplicar.");
+    setSync("saving");
+    try {
+      await batchUpsert("mrp_compras", updates, "plan_id,mat_code");
+      setSync("ok");
+      toast(`Propuesta aplicada a ${updates.length} insumos.`);
+      renderAnalisis(v);
+    } catch (e) { setSync("err"); toast(e.message, true); }
+  };
+}
+
+function saveCompra(c) {
+  const payload = {
+    plan_id: STATE.activePlanId, mat_code: c.mat_code,
+    decision_qty: num(c.decision_qty), provider: c.provider || "", oc: c.oc || "",
+    w1: num(c.w1), w2: num(c.w2), w3: num(c.w3), w4: num(c.w4), w5: num(c.w5),
+    updated_at: new Date().toISOString()
+  };
+  debounceSave("cmp_" + c.mat_code, async () => {
+    const { error } = await sb.from("mrp_compras").upsert(payload, { onConflict: "plan_id,mat_code" });
+    if (error) throw error;
+  });
+}
+
+// -------------------- 4. PROCURA SEMANAL (S1–S5) --------------------
+function renderProcura(v) {
+  const mrp = computeMrp();
+  const q = STATE.fProcura.q.toLowerCase();
+  const rows = mrp.rows.filter(r =>
+    (!STATE.fProcura.onlyActive || r.decision > 0 || r.c.total > 0) &&
+    (!q || r.m.code.toLowerCase().includes(q) || r.m.name.toLowerCase().includes(q))
+  );
+
+  v.innerHTML = `
+    <div class="kpi-grid">
+      ${[0, 1, 2, 3, 4].map(i => `<div class="kpi-card"><div class="kpi-label">Inversión Sem 0${i + 1}</div><div class="kpi-val">${fmtUsd(mrp.weeklyUsd[i])}</div></div>`).join("")}
+    </div>
+    <div class="bar">
+      <input type="search" id="fpr_q" placeholder="Buscar insumo…" value="${esc(STATE.fProcura.q)}">
+      <label class="toggle-lbl"><input type="checkbox" id="fpr_act" ${STATE.fProcura.onlyActive ? "checked" : ""}> Solo insumos con compra o consumo</label>
+      <button id="btn_autodist" class="primary" style="padding:8px 14px;font-size:.86rem">Autodistribuir según Consumo</button>
+    </div>
+    <div class="tablebox"><table class="mrp-table">
+      <thead><tr>
+        <th>Insumo</th><th class="num">Decisión Mes</th>
+        <th class="num">Sem 1</th><th class="num">Sem 2</th><th class="num">Sem 3</th><th class="num">Sem 4</th><th class="num">Sem 5</th>
+        <th>Check</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(r => {
+          const sumW = num(r.comp.w1) + num(r.comp.w2) + num(r.comp.w3) + num(r.comp.w4) + num(r.comp.w5);
+          const ok = Math.abs(sumW - r.decision) < 0.05;
+          return `<tr data-mat="${esc(r.m.code)}">
+            <td><strong>${esc(r.m.name)}</strong><div class="hint"><code>${esc(r.m.code)}</code> · ${esc(r.m.um)}</div></td>
+            <td class="num"><strong>${fmt(r.decision)}</strong></td>
+            ${["w1", "w2", "w3", "w4", "w5"].map(wk => `
+              <td class="num">
+                <input class="cell-inp" type="number" step="any" min="0" data-wk="${wk}" value="${num(r.comp[wk])}">
+                <div class="hint">Cons: ${fmt(r.c[wk], 1)}</div>
+              </td>`).join("")}
+            <td><span class="badge ${ok ? "ok" : "deficit"}">${ok ? "OK" : "REVISAR"}</span></td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:20px">No hay insumos activos en Procura Semanal.</td></tr>`}
+      </tbody>
+    </table></div>`;
+
+  $("#fpr_q").oninput = e => { STATE.fProcura.q = e.target.value; renderProcura(v); };
+  $("#fpr_act").onchange = e => { STATE.fProcura.onlyActive = e.target.checked; renderProcura(v); };
+
+  v.querySelectorAll("input[data-wk]").forEach(inp => {
+    inp.onchange = () => {
+      const code = inp.closest("tr").dataset.mat;
+      const cur = { ...getCompra(code), plan_id: STATE.activePlanId, mat_code: code };
+      cur[inp.dataset.wk] = Math.max(0, num(inp.value));
+      STATE.compras.set(code, cur);
+      saveCompra(cur);
+      renderProcura(v);
+    };
+  });
+
+  $("#btn_autodist").onclick = async () => {
+    const updates = [];
+    for (const r of rows) {
+      if (r.decision <= 0) continue;
+      const cur = { ...getCompra(r.m.code), plan_id: STATE.activePlanId, mat_code: r.m.code };
+      const totW = r.c.w1 + r.c.w2 + r.c.w3 + r.c.w4 + r.c.w5;
+      if (totW > 0) {
+        cur.w1 = Math.round((r.decision * (r.c.w1 / totW)) * 100) / 100;
+        cur.w2 = Math.round((r.decision * (r.c.w2 / totW)) * 100) / 100;
+        cur.w3 = Math.round((r.decision * (r.c.w3 / totW)) * 100) / 100;
+        cur.w4 = Math.round((r.decision * (r.c.w4 / totW)) * 100) / 100;
+        cur.w5 = Math.max(0, Math.round((r.decision - cur.w1 - cur.w2 - cur.w3 - cur.w4) * 100) / 100);
+      } else {
+        const q4 = Math.round((r.decision / 4) * 100) / 100;
+        cur.w1 = q4; cur.w2 = q4; cur.w3 = q4; cur.w4 = Math.max(0, Math.round((r.decision - q4 * 3) * 100) / 100); cur.w5 = 0;
+      }
+      STATE.compras.set(r.m.code, cur);
+      updates.push({
+        plan_id: STATE.activePlanId, mat_code: r.m.code, decision_qty: cur.decision_qty,
+        provider: cur.provider || "", oc: cur.oc || "",
+        w1: cur.w1, w2: cur.w2, w3: cur.w3, w4: cur.w4, w5: cur.w5
+      });
+    }
+    if (!updates.length) return toast("No hay compras > 0 para distribuir.");
+    setSync("saving");
+    try {
+      await batchUpsert("mrp_compras", updates, "plan_id,mat_code");
+      setSync("ok");
+      toast(`Distribuidas ${updates.length} compras semanalmente.`);
+      renderProcura(v);
+    } catch (e) { setSync("err"); toast(e.message, true); }
+  };
+}
+
+// -------------------- 5. CATÁLOGO E INVENTARIO (SIN COSTOS) --------------------
+function renderCatalogo(v) {
+  const q = STATE.fCatalogo.q.toLowerCase();
+  const list = [...STATE.materials.values()].filter(m =>
+    (!STATE.fCatalogo.type || m.type === STATE.fCatalogo.type) &&
+    (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+  );
+
+  v.innerHTML = `
+    <div class="bar">
+      <input type="search" id="fc_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fCatalogo.q)}">
+      <select id="fc_type">
+        <option value="">MP y ME</option>
+        <option value="MP" ${STATE.fCatalogo.type === "MP" ? "selected" : ""}>Materia Prima (MP)</option>
+        <option value="ME" ${STATE.fCatalogo.type === "ME" ? "selected" : ""}>Material Empaque (ME)</option>
+      </select>
+      <button id="btn_new_mat" class="primary" style="padding:8px 14px;font-size:.86rem">+ Nuevo Insumo</button>
+    </div>
+    <div class="tablebox"><table class="mrp-table">
+      <thead><tr>
+        <th>Código</th><th>Descripción</th><th>UM</th><th>Tipo</th>
+        <th class="num">Stock Disponible</th><th class="num">Lead (días)</th><th class="num">MOQ</th><th class="num">Redondeo</th><th class="num">% Stock Seg.</th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        ${list.map(m => `<tr data-mat="${esc(m.code)}">
+          <td><code>${esc(m.code)}</code></td>
+          <td><strong>${esc(m.name)}</strong></td>
+          <td>${esc(m.um)}</td>
+          <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+          <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="stock" value="${num(m.stock)}"></td>
+          <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="lead_time" value="${num(m.lead_time)}"></td>
+          <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-mf="moq" value="${num(m.moq)}"></td>
+          <td class="num"><input class="cell-inp" type="number" step="any" min="0.01" data-mf="rounding" value="${num(m.rounding)}"></td>
+          <td class="num"><input class="cell-inp" type="number" step="1" min="0" data-mf="safety_pct" value="${Math.round(num(m.safety_pct) * 100)}"></td>
+          <td><button class="btn-sm btn-danger" data-delmat="${esc(m.code)}">Eliminar</button></td>
+        </tr>`).join("") || `<tr><td colspan="10" class="hint" style="text-align:center;padding:20px">Sin insumos registrados.</td></tr>`}
+      </tbody>
+    </table></div>`;
+
+  $("#fc_q").oninput = e => { STATE.fCatalogo.q = e.target.value; renderCatalogo(v); };
+  $("#fc_type").onchange = e => { STATE.fCatalogo.type = e.target.value; renderCatalogo(v); };
+  $("#btn_new_mat").onclick = () => openNewMaterialModal();
+
+  v.querySelectorAll("input[data-mf]").forEach(inp => {
+    inp.onchange = () => {
+      const code = inp.closest("tr").dataset.mat;
+      const m = STATE.materials.get(code);
+      const f = inp.dataset.mf;
+      m[f] = f === "safety_pct" ? Math.max(0, num(inp.value) / 100) : Math.max(0, num(inp.value));
+      debounceSave("mat_" + code, async () => {
+        const { error } = await sb.from("mrp_materiales").update({ [f]: m[f], updated_at: new Date().toISOString() }).eq("code", code);
+        if (error) throw error;
+      });
+    };
+  });
+
+  v.querySelectorAll("[data-delmat]").forEach(btn => {
+    btn.onclick = async () => {
+      const code = btn.dataset.delmat;
+      const usedIn = [];
+      for (const [skuCode, items] of STATE.bom.entries()) {
+        if (items.some(i => i.mat_code === code)) usedIn.push(skuCode);
+      }
+      if (usedIn.length) {
+        return toast(`No se puede eliminar: usado en ${usedIn.length} fórmula(s) (${usedIn.slice(0, 3).join(", ")}).`, true);
+      }
+      if (!confirm(`¿Eliminar el insumo ${code} de Supabase?`)) return;
+      const { error } = await sb.from("mrp_materiales").delete().eq("code", code);
+      if (error) return toast("Error al eliminar: " + error.message, true);
+      STATE.materials.delete(code);
+      STATE.compras.delete(code);
+      toast("Insumo eliminado.");
+      renderCatalogo(v);
+    };
+  });
+}
+
+function openNewMaterialModal(onCreated) {
+  const d = $("#dlg");
+  d.innerHTML = `<form id="mf_new" autocomplete="off">
+    <h2>Nuevo Insumo (MP / ME)</h2>
+    <p class="hint" style="margin:0 0 12px">El costo unitario se asigna después en la pestaña <strong>Costos de Compra</strong>.</p>
+    <div class="row">
+      <label>Código *<input type="text" name="code" required placeholder="Ej. 105099"></label>
+      <label>Tipo *<select name="type"><option value="MP">Materia Prima (MP)</option><option value="ME">Material Empaque (ME)</option></select></label>
+    </div>
+    <label>Descripción *<input type="text" name="name" required placeholder="Nombre del insumo"></label>
+    <div class="row">
+      <label>Unidad de Medida<input type="text" name="um" value="Kg"></label>
+      <label>Stock Disponible<input type="number" step="any" min="0" name="stock" value="0"></label>
+    </div>
+    <div class="row">
+      <label>Lead Time (días)<input type="number" step="1" min="0" name="lead_time" value="3"></label>
+      <label>Compra Mínima (MOQ)<input type="number" step="any" min="0" name="moq" value="1"></label>
+    </div>
+    <div class="row">
+      <label>Redondeo<input type="number" step="any" min="0.01" name="rounding" value="1"></label>
+      <label>% Stock Seguridad<input type="number" step="1" min="0" name="safety_pct" value="20"></label>
+    </div>
+    <div class="err" id="m_err"></div>
+    <div class="bar"><button class="primary" type="submit">Guardar Insumo</button><button type="button" id="m_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#m_cls").onclick = () => d.close();
+  $("#mf_new").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    const code = f.code.value.trim();
+    const name = f.name.value.trim();
+    if (!code || !name) return $("#m_err").textContent = "Complete código y descripción.";
+    if (STATE.materials.has(code)) return $("#m_err").textContent = "Ese código ya existe.";
+    const rec = {
+      code, name, um: f.um.value.trim() || "Kg", type: f.type.value,
+      stock: num(f.stock.value), lead_time: num(f.lead_time.value),
+      moq: num(f.moq.value), rounding: num(f.rounding.value) || 1,
+      safety_pct: num(f.safety_pct.value) / 100, cost: 0, prev_cost: 0
+    };
+    const { error } = await sb.from("mrp_materiales").insert(rec);
+    if (error) return $("#m_err").textContent = error.message;
+    STATE.materials.set(code, rec);
+    d.close();
+    toast("Insumo creado en Supabase.");
+    if (onCreated) onCreated(code); else renderView();
+  };
+}
+
+// -------------------- 6. COSTOS DE COMPRA (SECCIÓN ÚNICA) --------------------
+function renderCostos(v) {
+  const q = STATE.fCostos.q.toLowerCase();
+  const all = [...STATE.materials.values()];
+  const zeroCount = all.filter(m => num(m.cost) <= 0).length;
+  const list = all.filter(m =>
+    (!STATE.fCostos.type || m.type === STATE.fCostos.type) &&
+    (!STATE.fCostos.onlyZero || num(m.cost) <= 0) &&
+    (!q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+  );
+
+  v.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Total Insumos</div><div class="kpi-val">${all.length}</div></div>
+      <div class="kpi-card ok"><div class="kpi-label">Con Último Costo</div><div class="kpi-val">${all.length - zeroCount}</div></div>
+      <div class="kpi-card ${zeroCount ? "warn" : "ok"}"><div class="kpi-label">Pendientes ($0)</div><div class="kpi-val">${zeroCount}</div></div>
+    </div>
+    <div class="bar">
+      <input type="search" id="fco_q" placeholder="Buscar insumo o código…" value="${esc(STATE.fCostos.q)}">
+      <select id="fco_type">
+        <option value="">MP y ME</option>
+        <option value="MP" ${STATE.fCostos.type === "MP" ? "selected" : ""}>Solo MP</option>
+        <option value="ME" ${STATE.fCostos.type === "ME" ? "selected" : ""}>Solo ME</option>
+      </select>
+      <label class="toggle-lbl"><input type="checkbox" id="fco_zero" ${STATE.fCostos.onlyZero ? "checked" : ""}> Solo sin costo ($0)</label>
+    </div>
+    <div class="tablebox"><table class="mrp-table">
+      <thead><tr>
+        <th>Código</th><th>Insumo</th><th>UM</th><th>Tipo</th>
+        <th class="num">Costo Anterior</th><th class="num">Último Costo (USD)</th><th class="num">% Variación</th><th>Actualizado</th><th>Acciones</th>
+      </tr></thead>
+      <tbody>
+        ${list.map(m => {
+          const c = num(m.cost), pc = num(m.prev_cost);
+          const diffPct = pc > 0 ? ((c - pc) / pc) * 100 : null;
+          const upd = m.cost_updated_at ? new Date(m.cost_updated_at).toLocaleDateString("es-VE") : "—";
+          return `<tr>
+            <td><code>${esc(m.code)}</code></td>
+            <td><strong>${esc(m.name)}</strong></td>
+            <td>${esc(m.um)}</td>
+            <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+            <td class="num">${pc > 0 ? fmtUsd(pc) : "—"}</td>
+            <td class="num"><strong style="color:${c <= 0 ? "var(--danger)" : "var(--brand)"}">${fmtUsd(c)}</strong></td>
+            <td class="num">${diffPct === null ? "—" : `<span style="color:${diffPct > 0 ? "var(--danger)" : "var(--ok)"};font-weight:700">${diffPct > 0 ? "+" : ""}${fmt(diffPct, 1)}%</span>`}</td>
+            <td class="hint">${upd}</td>
+            <td style="white-space:nowrap">
+              <button class="btn-sm primary" data-updcost="${esc(m.code)}">Actualizar Costo</button>
+              <button class="btn-sm" data-hist="${esc(m.code)}">Historial</button>
+            </td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="9" class="hint" style="text-align:center;padding:20px">No hay insumos que coincidan.</td></tr>`}
+      </tbody>
+    </table></div>`;
+
+  $("#fco_q").oninput = e => { STATE.fCostos.q = e.target.value; renderCostos(v); };
+  $("#fco_type").onchange = e => { STATE.fCostos.type = e.target.value; renderCostos(v); };
+  $("#fco_zero").onchange = e => { STATE.fCostos.onlyZero = e.target.checked; renderCostos(v); };
+
+  v.querySelectorAll("[data-updcost]").forEach(b => b.onclick = () => openUpdateCostModal(b.dataset.updcost));
+  v.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => openCostHistoryModal(b.dataset.hist));
+}
+
+function openUpdateCostModal(code) {
+  const m = STATE.materials.get(code);
+  const d = $("#dlg");
+  d.innerHTML = `<form id="cf_upd" autocomplete="off">
+    <h2>Actualizar Último Costo</h2>
+    <p class="hint" style="margin:0 0 12px"><strong>${esc(m.name)}</strong> (<code>${esc(m.code)}</code> · ${esc(m.um)})</p>
+    <div class="row">
+      <label>Costo Vigente Actual (USD)<input type="text" value="${fmtUsd(m.cost)}" disabled></label>
+      <label>Nuevo Último Costo (USD) *<input type="number" step="any" min="0" name="new_cost" required value="${num(m.cost)}"></label>
+    </div>
+    <label>Proveedor (opcional)<input type="text" name="provider" list="dl_proveedores" placeholder="Seleccione un proveedor aprobado…"></label>
+    <label>Referencia / Nota (ej. Factura o O/C)<input type="text" name="note" placeholder="Ej. O/C #1042"></label>
+    <div class="err" id="cu_err"></div>
+    <div class="bar"><button class="primary" type="submit">Guardar Nuevo Costo</button><button type="button" id="cu_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#cu_cls").onclick = () => d.close();
+  $("#cf_upd").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    const newCost = Math.max(0, num(f.new_cost.value));
+    const oldCost = num(m.cost);
+    const now = new Date().toISOString();
+    try {
+      const { error: e1 } = await sb.from("mrp_materiales").update({
+        prev_cost: oldCost, cost: newCost, cost_updated_at: now, updated_at: now
+      }).eq("code", code);
+      if (e1) throw e1;
+      const { error: e2 } = await sb.from("mrp_costos_historial").insert({
+        mat_code: code, old_cost: oldCost, new_cost: newCost,
+        provider: f.provider.value.trim() || null, note: f.note.value.trim() || null
+      });
+      if (e2) throw e2;
+      m.prev_cost = oldCost; m.cost = newCost; m.cost_updated_at = now;
+      d.close();
+      toast(`Último costo de ${m.name} actualizado a ${fmtUsd(newCost)}.`);
+      renderView();
+    } catch (err) {
+      $("#cu_err").textContent = err.message || "Error al guardar.";
+    }
+  };
+}
+
+async function openCostHistoryModal(code) {
+  const m = STATE.materials.get(code);
+  const d = $("#dlg");
+  d.innerHTML = `<h2>Historial de Costos · ${esc(m.name)}</h2><p class="hint">Cargando…</p>`;
+  d.showModal();
+  const { data, error } = await sb.from("mrp_costos_historial").select("*").eq("mat_code", code).order("created_at", { ascending: false }).limit(50);
+  if (error) { d.innerHTML = `<p class="err">${esc(error.message)}</p><button onclick="this.closest('dialog').close()">Cerrar</button>`; return; }
+  d.innerHTML = `
+    <h2>Historial de Costos</h2>
+    <p class="hint" style="margin:0 0 12px"><strong>${esc(m.name)}</strong> (<code>${esc(m.code)}</code>)</p>
+    <div class="tablebox"><table class="mrp-table">
+      <thead><tr><th>Fecha</th><th class="num">Anterior</th><th class="num">Nuevo Costo</th><th>Proveedor</th><th>Nota</th></tr></thead>
+      <tbody>
+        ${(data || []).map(h => `<tr>
+          <td>${new Date(h.created_at).toLocaleString("es-VE")}</td>
+          <td class="num">${fmtUsd(h.old_cost)}</td>
+          <td class="num"><strong>${fmtUsd(h.new_cost)}</strong></td>
+          <td>${esc(h.provider || "—")}</td>
+          <td>${esc(h.note || "—")}</td>
+        </tr>`).join("") || `<tr><td colspan="5" class="hint" style="text-align:center;padding:16px">Sin cambios registrados todavía.</td></tr>`}
+      </tbody>
+    </table></div>
+    <div class="bar" style="margin-top:14px"><button type="button" onclick="this.closest('dialog').close()">Cerrar</button></div>`;
+}
+
+// -------------------- 7. FÓRMULAS (BOM) CON CREAR / DUPLICAR / ELIMINAR --------------------
+function renderFormulas(v) {
+  const cats = [...new Set([...STATE.skus.values()].map(s => s.category))].sort();
+  const q = STATE.fBom.q.toLowerCase();
+  const skus = [...STATE.skus.values()].filter(s =>
+    (!STATE.fBom.cat || s.category === STATE.fBom.cat) &&
+    (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
+  );
+  if (STATE.selectedSku && !STATE.skus.has(STATE.selectedSku)) STATE.selectedSku = skus[0]?.code || null;
+  if (!STATE.selectedSku && skus.length) STATE.selectedSku = skus[0].code;
+
+  const sel = STATE.selectedSku ? STATE.skus.get(STATE.selectedSku) : null;
+  const bom = sel ? (STATE.bom.get(sel.code) || []) : [];
+  const cb = sel ? skuCostBreakdown(sel.code) : null;
+  const massOk = sel ? Math.abs(cb.kgSum - num(sel.batch_size_kg)) <= Math.max(1, num(sel.batch_size_kg) * 0.01) : true;
+
+  v.innerHTML = `
+    <div class="bom-layout">
+      <div class="panel-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <h3 style="margin:0">SKUs (${STATE.skus.size})</h3>
+          <button id="btn_new_sku" class="btn-sm primary">+ Nueva</button>
+        </div>
+        <input type="search" id="fb_q" placeholder="Filtrar SKU…" value="${esc(STATE.fBom.q)}" style="margin-bottom:8px">
+        <select id="fb_cat" style="margin-bottom:10px"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === STATE.fBom.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <div class="sku-list">
+          ${skus.map(s => `<button class="sku-item ${s.code === STATE.selectedSku ? "active" : ""}" data-selsku="${esc(s.code)}">
+            <div><strong>${esc(s.name)}</strong></div>
+            <div class="hint">${esc(s.code)} · ${esc(s.category)} · ${(STATE.bom.get(s.code) || []).length} ins.</div>
+          </button>`).join("") || `<p class="hint">Sin fórmulas.</p>`}
+        </div>
+      </div>
+
+      <div class="panel-card">
+        ${sel ? `
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+            <div>
+              <h3 style="margin:0">${esc(sel.name)}</h3>
+              <div class="hint">Código: <code>${esc(sel.code)}</code> · Categoría: <strong>${esc(sel.category)}</strong></div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn-sm" id="btn_dup_sku">Duplicar Fórmula</button>
+              <button class="btn-sm btn-danger" id="btn_del_sku">Eliminar Fórmula</button>
+            </div>
+          </div>
+
+          <div class="row" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin-bottom:12px">
+            <label>Unds / Caja<input type="number" step="1" min="1" id="sk_uc" value="${num(sel.units_per_case)}"></label>
+            <label>Peso Neto / Caja (Kg)<input type="number" step="any" min="0.01" id="sk_pw" value="${num(sel.net_weight_per_case)}"></label>
+            <label>Tamaño Lote (Kg)<input type="number" step="any" min="1" id="sk_bk" value="${num(sel.batch_size_kg)}"></label>
+            <label>Rendimiento (%)<input type="number" step="any" min="1" max="100" id="sk_yp" value="${num(sel.yield_pct || 98)}"></label>
+            <label>Lote (Cajas)<input type="number" step="any" id="sk_bc" value="${fmt(sel.batch_size_cases, 2).replace(",", ".")}" disabled></label>
+          </div>
+
+          <div class="kpi-grid" style="margin-bottom:14px">
+            <div class="kpi-card"><div class="kpi-label">Costo Lote (MP / ME)</div><div class="kpi-val">${fmtUsd(cb.total)}</div><div class="kpi-sub">MP: ${fmtUsd(cb.mp)} · ME: ${fmtUsd(cb.me)}</div></div>
+            <div class="kpi-card accent"><div class="kpi-label">Costo / Caja</div><div class="kpi-val">${fmtUsd(cb.perCase)}</div><div class="kpi-sub">Costo / Und: ${fmtUsd(cb.perUnit)}</div></div>
+            <div class="kpi-card ${massOk ? "ok" : "warn"}"><div class="kpi-label">Balance Masa MP</div><div class="kpi-val">${fmt(cb.kgSum, 2)} kg</div><div class="kpi-sub">Meta: ${fmt(sel.batch_size_kg, 0)} kg · ${massOk ? "OK ✓" : "REVISAR (±1%)"}</div></div>
+          </div>
+
+          <div class="bar">
+            <select id="bom_add_mat" style="flex:1;min-width:220px">
+              <option value="">+ Agregar insumo a la receta…</option>
+              ${[...STATE.materials.values()].map(m => `<option value="${esc(m.code)}">[${m.type}] ${esc(m.code)} — ${esc(m.name)} (${esc(m.um)})</option>`).join("")}
+            </select>
+            <input type="number" id="bom_add_qty" step="any" min="0" placeholder="Cant/Lote" style="width:120px">
+            <button id="btn_bom_add" class="primary" style="padding:8px 14px;font-size:.86rem">Agregar</button>
+            <button id="btn_bom_newmat" class="btn-sm">+ Crear Insumo</button>
+          </div>
+
+          <div class="tablebox"><table class="mrp-table">
+            <thead><tr><th>Código</th><th>Insumo</th><th>Tipo</th><th>UM</th><th class="num">Cant. / Lote</th><th class="num">Último Costo</th><th class="num">Subtotal Lote</th><th></th></tr></thead>
+            <tbody>
+              ${bom.map(it => {
+                const m = STATE.materials.get(it.mat_code);
+                if (!m) return "";
+                return `<tr data-mat="${esc(m.code)}">
+                  <td><code>${esc(m.code)}</code></td>
+                  <td><strong>${esc(m.name)}</strong></td>
+                  <td><span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type}</span></td>
+                  <td>${esc(m.um)}</td>
+                  <td class="num"><input class="cell-inp" type="number" step="any" min="0" data-bqty value="${num(it.qty_per_batch)}"></td>
+                  <td class="num">${fmtUsd(m.cost)}</td>
+                  <td class="num"><strong>${fmtUsd(num(it.qty_per_batch) * num(m.cost))}</strong></td>
+                  <td><button class="btn-sm btn-danger" data-brm="${esc(m.code)}">Quitar</button></td>
+                </tr>`;
+              }).join("") || `<tr><td colspan="8" class="hint" style="text-align:center;padding:18px">Esta fórmula no tiene ingredientes cargados.</td></tr>`}
+            </tbody>
+          </table></div>
+        ` : `<div class="empty-hero"><h3>Seleccione o cree una fórmula</h3><button class="primary" id="btn_new_sku2">+ Nueva Fórmula</button></div>`}
+      </div>
+    </div>`;
+
+  $("#fb_q").oninput = e => { STATE.fBom.q = e.target.value; renderFormulas(v); };
+  $("#fb_cat").onchange = e => { STATE.fBom.cat = e.target.value; renderFormulas(v); };
+  $("#btn_new_sku").onclick = () => openNewSkuModal();
+  if ($("#btn_new_sku2")) $("#btn_new_sku2").onclick = () => openNewSkuModal();
+
+  v.querySelectorAll("[data-selsku]").forEach(b => b.onclick = () => { STATE.selectedSku = b.dataset.selsku; renderFormulas(v); });
+  if (!sel) return;
+
+  // Edición de parámetros del SKU
+  const saveSkuParams = () => {
+    sel.units_per_case = Math.max(1, num($("#sk_uc").value));
+    sel.net_weight_per_case = Math.max(0.001, num($("#sk_pw").value));
+    sel.batch_size_kg = Math.max(1, num($("#sk_bk").value));
+    sel.yield_pct = Math.max(1, Math.min(100, num($("#sk_yp").value)));
+    sel.batch_size_cases = (sel.batch_size_kg / sel.net_weight_per_case) * (sel.yield_pct / 100);
+    debounceSave("sku_" + sel.code, async () => {
+      const { error } = await sb.from("mrp_skus").update({
+        units_per_case: sel.units_per_case, net_weight_per_case: sel.net_weight_per_case,
+        batch_size_kg: sel.batch_size_kg, yield_pct: sel.yield_pct,
+        batch_size_cases: sel.batch_size_cases, updated_at: new Date().toISOString()
+      }).eq("code", sel.code);
+      if (error) throw error;
+    });
+    renderFormulas(v);
+  };
+  ["#sk_uc", "#sk_pw", "#sk_bk", "#sk_yp"].forEach(id => $(id).onchange = saveSkuParams);
+
+  // Agregar ingrediente
+  $("#btn_bom_add").onclick = async () => {
+    const matCode = $("#bom_add_mat").value;
+    const qty = num($("#bom_add_qty").value);
+    if (!matCode || qty <= 0) return toast("Seleccione un insumo y escriba una cantidad > 0.", true);
+    const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
+    if (error) return toast(error.message, true);
+    if (!STATE.bom.has(sel.code)) STATE.bom.set(sel.code, []);
+    const arr = STATE.bom.get(sel.code);
+    const ex = arr.find(x => x.mat_code === matCode);
+    if (ex) ex.qty_per_batch = qty; else arr.push({ mat_code: matCode, qty_per_batch: qty });
+    toast("Ingrediente agregado.");
+    renderFormulas(v);
+  };
+
+  $("#btn_bom_newmat").onclick = () => openNewMaterialModal(() => renderFormulas(v));
+
+  v.querySelectorAll("input[data-bqty]").forEach(inp => {
+    inp.onchange = () => {
+      const matCode = inp.closest("tr").dataset.mat;
+      const qty = Math.max(0, num(inp.value));
+      const item = (STATE.bom.get(sel.code) || []).find(x => x.mat_code === matCode);
+      if (item) item.qty_per_batch = qty;
+      debounceSave(`bom_${sel.code}_${matCode}`, async () => {
+        const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
+        if (error) throw error;
+      });
+      renderFormulas(v);
+    };
+  });
+
+  v.querySelectorAll("[data-brm]").forEach(btn => {
+    btn.onclick = async () => {
+      const matCode = btn.dataset.brm;
+      const { error } = await sb.from("mrp_bom").delete().eq("sku_code", sel.code).eq("mat_code", matCode);
+      if (error) return toast(error.message, true);
+      STATE.bom.set(sel.code, (STATE.bom.get(sel.code) || []).filter(x => x.mat_code !== matCode));
+      renderFormulas(v);
+    };
+  });
+
+  $("#btn_dup_sku").onclick = () => openDuplicateSkuModal(sel);
+  $("#btn_del_sku").onclick = () => openDeleteSkuModal(sel);
+}
+
+function openNewSkuModal() {
+  const d = $("#dlg");
+  d.innerHTML = `<form id="sf_new" autocomplete="off">
+    <h2>Nueva Fórmula (Producto Terminado)</h2>
+    <div class="row">
+      <label>Código SKU *<input type="text" name="code" required placeholder="Ej. 124099"></label>
+      <label>Categoría *<input type="text" name="category" required placeholder="Ej. KETCHUP"></label>
+    </div>
+    <label>Descripción del Producto *<input type="text" name="name" required placeholder="Ej. KETCHUP 12X397 GRS"></label>
+    <div class="row">
+      <label>Unidades / Caja<input type="number" step="1" min="1" name="uc" value="12"></label>
+      <label>Peso Neto / Caja (Kg)<input type="number" step="any" min="0.01" name="pw" value="4.8"></label>
+    </div>
+    <div class="row">
+      <label>Tamaño Lote (Kg)<input type="number" step="any" min="1" name="bk" value="1000"></label>
+      <label>Rendimiento (%)<input type="number" step="any" min="1" max="100" name="yp" value="98"></label>
+    </div>
+    <div class="err" id="s_err"></div>
+    <div class="bar"><button class="primary" type="submit">Crear Fórmula</button><button type="button" id="s_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#s_cls").onclick = () => d.close();
+  $("#sf_new").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    const code = f.code.value.trim(), name = f.name.value.trim(), category = f.category.value.trim().toUpperCase();
+    if (!code || !name || !category) return $("#s_err").textContent = "Complete los campos obligatorios.";
+    if (STATE.skus.has(code)) return $("#s_err").textContent = "Ese código SKU ya existe.";
+    const pw = Math.max(0.001, num(f.pw.value)), bk = Math.max(1, num(f.bk.value)), yp = Math.max(1, Math.min(100, num(f.yp.value)));
+    const rec = { code, name, category, units_per_case: Math.max(1, num(f.uc.value)), net_weight_per_case: pw, batch_size_kg: bk, yield_pct: yp, batch_size_cases: (bk / pw) * (yp / 100) };
+    const { error } = await sb.from("mrp_skus").insert(rec);
+    if (error) return $("#s_err").textContent = error.message;
+    STATE.skus.set(code, rec);
+    STATE.bom.set(code, []);
+    STATE.selectedSku = code;
+    d.close();
+    toast("Fórmula creada.");
+    renderView();
+  };
+}
+
+function openDuplicateSkuModal(src) {
+  const d = $("#dlg");
+  d.innerHTML = `<form id="sf_dup" autocomplete="off">
+    <h2>Duplicar Fórmula</h2>
+    <p class="hint" style="margin:0 0 12px">Copiando ingredientes de <strong>${esc(src.name)}</strong></p>
+    <div class="row">
+      <label>Nuevo Código SKU *<input type="text" name="code" required value="${esc(src.code)}-COPIA"></label>
+      <label>Categoría *<input type="text" name="category" required value="${esc(src.category)}"></label>
+    </div>
+    <label>Nueva Descripción *<input type="text" name="name" required value="${esc(src.name)} (Copia)"></label>
+    <div class="err" id="sd_err"></div>
+    <div class="bar"><button class="primary" type="submit">Duplicar</button><button type="button" id="sd_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#sd_cls").onclick = () => d.close();
+  $("#sf_dup").onsubmit = async e => {
+    e.preventDefault();
+    const f = e.target;
+    const code = f.code.value.trim(), name = f.name.value.trim(), category = f.category.value.trim().toUpperCase();
+    if (!code || !name) return $("#sd_err").textContent = "Complete código y nombre.";
+    if (STATE.skus.has(code)) return $("#sd_err").textContent = "Ese código SKU ya existe.";
+    const rec = { ...src, code, name, category, updated_at: new Date().toISOString() };
+    const { error: e1 } = await sb.from("mrp_skus").insert(rec);
+    if (e1) return $("#sd_err").textContent = e1.message;
+    const srcBom = (STATE.bom.get(src.code) || []).map(x => ({ sku_code: code, mat_code: x.mat_code, qty_per_batch: x.qty_per_batch }));
+    if (srcBom.length) {
+      const { error: e2 } = await sb.from("mrp_bom").insert(srcBom);
+      if (e2) return $("#sd_err").textContent = e2.message;
+    }
+    STATE.skus.set(code, rec);
+    STATE.bom.set(code, srcBom);
+    STATE.selectedSku = code;
+    d.close();
+    toast("Fórmula duplicada correctamente.");
+    renderView();
+  };
+}
+
+function openDeleteSkuModal(sku) {
+  const d = $("#dlg");
+  d.innerHTML = `<h2>Eliminar Fórmula</h2>
+    <p>¿Qué desea hacer con <strong>${esc(sku.name)}</strong> (<code>${esc(sku.code)}</code>)?</p>
+    <div class="bar" style="margin-top:16px">
+      <button type="button" id="del_bom_only">Vaciar solo ingredientes</button>
+      <button type="button" id="del_sku_all" class="btn-danger">Eliminar SKU y su fórmula</button>
+      <button type="button" id="del_cancel" style="margin-left:auto">Cancelar</button>
+    </div>`;
+  d.showModal();
+  $("#del_cancel").onclick = () => d.close();
+  $("#del_bom_only").onclick = async () => {
+    const { error } = await sb.from("mrp_bom").delete().eq("sku_code", sku.code);
+    if (error) return toast(error.message, true);
+    STATE.bom.set(sku.code, []);
+    d.close();
+    toast("Ingredientes eliminados.");
+    renderView();
+  };
+  $("#del_sku_all").onclick = async () => {
+    const { error } = await sb.from("mrp_skus").delete().eq("code", sku.code);
+    if (error) return toast(error.message, true);
+    STATE.skus.delete(sku.code);
+    STATE.bom.delete(sku.code);
+    STATE.planItems.delete(sku.code);
+    STATE.selectedSku = [...STATE.skus.keys()][0] || null;
+    d.close();
+    toast("SKU eliminado de Supabase.");
+    renderView();
+  };
+}
+
+// -------------------- NUEVA PLANIFICACIÓN --------------------
+$("#btn_new_plan").onclick = () => {
+  const d = $("#dlg");
+  const nextLabel = "Planificación " + new Date().toISOString().slice(0, 7);
+  d.innerHTML = `<form id="pf_new" autocomplete="off">
+    <h2>Comenzar Nueva Planificación</h2>
+    <p class="hint" style="margin:0 0 12px">Crea un nuevo período mensual en Supabase conservando intacto su catálogo de insumos, últimos costos y fórmulas.</p>
+    <label>Nombre del Período *<input type="text" name="name" required value="${esc(nextLabel)}" placeholder="Ej. Diciembre 2026"></label>
+    <div class="err" id="p_err"></div>
+    <div class="bar"><button class="primary" type="submit">Crear Plan Mensual</button><button type="button" id="p_cls">Cancelar</button></div>
+  </form>`;
+  d.showModal();
+  $("#p_cls").onclick = () => d.close();
+  $("#pf_new").onsubmit = async e => {
+    e.preventDefault();
+    const name = e.target.name.value.trim();
+    if (!name) return $("#p_err").textContent = "Escriba un nombre.";
+    const { data, error } = await sb.from("mrp_planes").insert({ name, is_active: true }).select().single();
+    if (error) return $("#p_err").textContent = error.message;
+    STATE.planes.unshift(data);
+    STATE.activePlanId = data.id;
+    renderPlanSelector();
+    await loadPlanData(data.id);
+    d.close();
+    toast(`Nuevo plan "${name}" creado.`);
+  };
+};
+
+// -------------------- IMPORTACIÓN EXCEL (.XLSX) HACIA SUPABASE --------------------
+$("#inp_xlsx").onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  setSync("saving", "Importando Excel…");
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const sheets = wb.SheetNames;
+    const isAppExport = sheets.includes("Analisis_MRP") && sheets.includes("Formulas_BOM");
+    const parsed = isAppExport ? parseAppExport(wb) : parseOriginalExcel(wb);
+
+    if (!parsed.materials.length && !parsed.skus.length) {
+      throw new Error("No se encontraron hojas reconocidas (ANALISIS / PLAN MES / F.* o exportación MRP).");
+    }
+
+    // Guardar en Supabase por lotes respetando llaves foráneas
+    await batchUpsert("mrp_materiales", parsed.materials, "code");
+    await batchUpsert("mrp_skus", parsed.skus, "code");
+    if (parsed.bom.length) await batchUpsert("mrp_bom", parsed.bom, "sku_code,mat_code");
+    if (parsed.planItems.length) {
+      const piRows = parsed.planItems.map(x => ({ ...x, plan_id: STATE.activePlanId }));
+      await batchUpsert("mrp_plan_items", piRows, "plan_id,sku_code");
+    }
+    if (parsed.compras.length) {
+      const cRows = parsed.compras.map(x => ({ ...x, plan_id: STATE.activePlanId }));
+      await batchUpsert("mrp_compras", cRows, "plan_id,mat_code");
+    }
+
+    await loadAll();
+    toast(`Importación exitosa: ${parsed.materials.length} insumos, ${parsed.skus.length} SKUs y ${parsed.bom.length} líneas de receta.`);
+  } catch (err) {
+    console.error(err);
+    setSync("err");
+    toast("Error al importar Excel: " + (err.message || err), true);
+  }
+};
+
+function cleanNum(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    if (v.startsWith("#")) return 0;
+    const n = Number(v.replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function parseOriginalExcel(wb) {
+  const matMap = new Map();
+  const skuMap = new Map();
+  const bomMap = new Map();
+  const planMap = new Map();
+  const compMap = new Map();
+
+  // 1. ANALISIS
+  if (wb.SheetNames.includes("ANALISIS")) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets["ANALISIS"], { header: 1, defval: null });
+    for (let i = 3; i < rows.length; i++) {
+      const r = rows[i];
+      const code = r[0] != null ? String(r[0]).trim() : "";
+      const name = r[1] != null ? String(r[1]).trim() : "";
+      const type = r[3] != null ? String(r[3]).trim().toUpperCase() : "";
+      if (!code || !name || !["MP", "ME"].includes(type)) continue;
+      matMap.set(code, {
+        code, name, um: String(r[2] || "Kg").trim(), type,
+        lead_time: cleanNum(r[4]) || 3, moq: cleanNum(r[5]) || 1,
+        rounding: cleanNum(r[6]) || 1, safety_pct: cleanNum(r[7]) || 0.2,
+        stock: cleanNum(r[8]), cost: cleanNum(r[22]), prev_cost: 0
+      });
+      const dec = cleanNum(r[15]);
+      if (dec > 0 || r[16] || r[17]) {
+        compMap.set(code, { mat_code: code, decision_qty: dec, provider: String(r[16] || "").trim(), oc: String(r[17] || "").trim(), w1: 0, w2: 0, w3: 0, w4: 0, w5: 0 });
+      }
+    }
+  }
+
+  // 2. INVENTARIO
+  if (wb.SheetNames.includes("INVENTARIO")) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets["INVENTARIO"], { header: 1, defval: null });
+    for (let i = 4; i < rows.length; i++) {
+      const r = rows[i];
+      const code = r[0] != null ? String(r[0]).trim() : "";
+      if (code && matMap.has(code)) matMap.get(code).stock = cleanNum(r[3]);
+    }
+  }
+
+  // 3. AGREGAR COSTOS
+  if (wb.SheetNames.includes("AGREGAR COSTOS")) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets["AGREGAR COSTOS"], { header: 1, defval: null });
+    for (let i = 5; i < rows.length; i++) {
+      const r = rows[i];
+      const code = r[0] != null ? String(r[0]).trim() : "";
+      if (code && matMap.has(code)) {
+        const c = cleanNum(r[3]), pc = cleanNum(r[5]);
+        if (c > 0) matMap.get(code).cost = c;
+        if (pc > 0) matMap.get(code).prev_cost = pc;
+      }
+    }
+  }
+
+  // 4. Hojas F.* (Fórmulas)
+  for (const sName of wb.SheetNames) {
+    if (!sName.startsWith("F.") || sName.includes("Despulpado") || sName.includes("Base")) continue;
+    const cat = sName.replace(/^F\.\s*/i, "").trim().toUpperCase();
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sName], { header: 1, defval: null });
+    let codRow = -1;
+    for (let r = 0; r < Math.min(15, rows.length); r++) {
+      if (String(rows[r]?.[2] || "").trim().toUpperCase().startsWith("CODIGO")) { codRow = r; break; }
+    }
+    if (codRow < 0) continue;
+    const maxCol = (rows[codRow] || []).length;
+    for (let c = 3; c < maxCol; c++) {
+      const code = rows[codRow]?.[c] != null ? String(rows[codRow][c]).trim() : "";
+      const name = rows[codRow + 1]?.[c] != null ? String(rows[codRow + 1][c]).trim() : "";
+      if (!code || !name || name === "0" || code === "0") continue;
+      const uc = cleanNum(rows[codRow + 2]?.[c]) || 12;
+      const pw = cleanNum(rows[codRow + 3]?.[c]) || 1;
+      const bk = cleanNum(rows[codRow + 6]?.[c]) || 1000;
+      const bc = cleanNum(rows[codRow + 7]?.[c]) || (bk / pw);
+      const yp = pw > 0 && bk > 0 ? Math.min(100, Math.round(((bc * pw) / bk) * 1000) / 10) : 98;
+      skuMap.set(code, { code, name, category: cat, units_per_case: uc, net_weight_per_case: pw, batch_size_kg: bk, yield_pct: yp || 98, batch_size_cases: bc });
+
+      for (let r = codRow + 10; r < rows.length - 1; r++) {
+        const mCode = rows[r]?.[0] != null ? String(rows[r][0]).trim() : "";
+        const qty = cleanNum(rows[r]?.[c]);
+        if (mCode && qty > 0 && matMap.has(mCode)) {
+          bomMap.set(`${code}__${mCode}`, { sku_code: code, mat_code: mCode, qty_per_batch: qty });
+        }
+      }
+    }
+  }
+
+  // 5. PLAN MES
+  if (wb.SheetNames.includes("PLAN MES")) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets["PLAN MES"], { header: 1, defval: null });
+    for (let i = 6; i < rows.length; i++) {
+      const r = rows[i];
+      const code = r[1] != null ? String(r[1]).trim() : "";
+      if (!code || !skuMap.has(code)) continue;
+      const fc = cleanNum(r[8]), pq = cleanNum(r[9]);
+      const w1 = cleanNum(r[12]), w2 = cleanNum(r[13]), w3 = cleanNum(r[14]), w4 = cleanNum(r[15]), w5 = cleanNum(r[16]);
+      if (fc > 0 || pq > 0 || w1 + w2 + w3 + w4 + w5 > 0) {
+        planMap.set(code, { sku_code: code, forecast: fc, plan_qty: pq, w1, w2, w3, w4, w5 });
+      }
+    }
+  }
+
+  return {
+    materials: [...matMap.values()],
+    skus: [...skuMap.values()],
+    bom: [...bomMap.values()],
+    planItems: [...planMap.values()],
+    compras: [...compMap.values()]
+  };
+}
+
+function parseAppExport(wb) {
+  const matMap = new Map(), skuMap = new Map(), bomMap = new Map(), planMap = new Map(), compMap = new Map();
+  const costRows = wb.SheetNames.includes("Costos_Compra") ? XLSX.utils.sheet_to_json(wb.Sheets["Costos_Compra"]) : [];
+  const costByCode = new Map(costRows.map(r => [String(r.Codigo || "").trim(), { cost: cleanNum(r.Ultimo_Costo_USD), prev: cleanNum(r.Costo_Anterior_USD) }]));
+
+  XLSX.utils.sheet_to_json(wb.Sheets["Analisis_MRP"]).forEach(r => {
+    const code = String(r.Codigo || "").trim();
+    if (!code) return;
+    const ci = costByCode.get(code) || { cost: cleanNum(r.Costo_Unit_USD), prev: 0 };
+    matMap.set(code, {
+      code, name: String(r.Descripcion || code).trim(), um: String(r.UM || "Kg").trim(),
+      type: String(r.Tipo || "MP").toUpperCase() === "ME" ? "ME" : "MP",
+      lead_time: cleanNum(r.Lead_Time) || 3, moq: cleanNum(r.MOQ) || 1,
+      rounding: cleanNum(r.Redondeo) || 1, safety_pct: cleanNum(r.Stock_Seguridad_Pct) / 100 || 0.2,
+      stock: cleanNum(r.Stock_Disponible), cost: ci.cost, prev_cost: ci.prev
+    });
+    if (cleanNum(r.Decision_Compra) > 0 || r.Proveedor || r.OC) {
+      compMap.set(code, { mat_code: code, decision_qty: cleanNum(r.Decision_Compra), provider: String(r.Proveedor || ""), oc: String(r.OC || ""), w1: 0, w2: 0, w3: 0, w4: 0, w5: 0 });
+    }
+  });
+
+  if (wb.SheetNames.includes("Plan_Produccion")) {
+    XLSX.utils.sheet_to_json(wb.Sheets["Plan_Produccion"]).forEach(r => {
+      const code = String(r.Codigo || "").trim();
+      if (!code) return;
+      skuMap.set(code, {
+        code, name: String(r.SKU || code).trim(), category: String(r.Categoria || "GENERAL").trim().toUpperCase(),
+        units_per_case: cleanNum(r.Unds_Caja) || 12, net_weight_per_case: cleanNum(r.Peso_Caja_Kg) || 1,
+        batch_size_kg: cleanNum(r.Lote_Kg) || 1000, yield_pct: cleanNum(r.Rendimiento_Pct) || 98,
+        batch_size_cases: cleanNum(r.Lote_Cajas) || 100
+      });
+      planMap.set(code, {
+        sku_code: code, forecast: cleanNum(r.Forecast), plan_qty: cleanNum(r.Plan_Mes),
+        w1: cleanNum(r.Sem_1), w2: cleanNum(r.Sem_2), w3: cleanNum(r.Sem_3), w4: cleanNum(r.Sem_4), w5: cleanNum(r.Sem_5)
+      });
+    });
+  }
+
+  XLSX.utils.sheet_to_json(wb.Sheets["Formulas_BOM"]).forEach(r => {
+    const s = String(r.Codigo_SKU || "").trim(), m = String(r.Codigo_Insumo || "").trim(), q = cleanNum(r.Cant_Por_Lote);
+    if (s && m && q > 0 && skuMap.has(s) && matMap.has(m)) bomMap.set(`${s}__${m}`, { sku_code: s, mat_code: m, qty_per_batch: q });
+  });
+
+  return { materials: [...matMap.values()], skus: [...skuMap.values()], bom: [...bomMap.values()], planItems: [...planMap.values()], compras: [...compMap.values()] };
+}
+
+// -------------------- EXPORTACIÓN EXCEL (.XLSX) DE 6 HOJAS --------------------
+$("#btn_export").onclick = () => {
+  const mrp = computeMrp();
+  const wb = XLSX.utils.book_new();
+  const planName = STATE.planes.find(p => p.id === STATE.activePlanId)?.name || "MRP";
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    { Indicador: "Plan Activo", Valor: planName },
+    { Indicador: "Inversión Total (USD)", Valor: Number(mrp.totalInvUsd.toFixed(2)) },
+    { Indicador: "Inversión Materia Prima (USD)", Valor: Number(mrp.totalMpUsd.toFixed(2)) },
+    { Indicador: "Inversión Material Empaque (USD)", Valor: Number(mrp.totalMeUsd.toFixed(2)) },
+    { Indicador: "Total Cajas Planificadas", Valor: mrp.totalCases },
+    { Indicador: "Insumos en Déficit", Valor: mrp.deficitCount },
+    { Indicador: "Insumos Sin Costo ($0)", Valor: mrp.noCostCount }
+  ]), "Resumen_Ejecutivo");
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([...STATE.skus.values()].map(s => {
+    const pi = getPlanItem(s.code);
+    return {
+      Codigo: s.code, SKU: s.name, Categoria: s.category, Unds_Caja: s.units_per_case,
+      Peso_Caja_Kg: s.net_weight_per_case, Lote_Kg: s.batch_size_kg, Rendimiento_Pct: s.yield_pct,
+      Lote_Cajas: Number(num(s.batch_size_cases).toFixed(4)), Forecast: num(pi.forecast), Plan_Mes: num(pi.plan_qty),
+      Sem_1: num(pi.w1), Sem_2: num(pi.w2), Sem_3: num(pi.w3), Sem_4: num(pi.w4), Sem_5: num(pi.w5)
+    };
+  })), "Plan_Produccion");
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mrp.rows.map(r => ({
+    Codigo: r.m.code, Descripcion: r.m.name, UM: r.m.um, Tipo: r.m.type,
+    Lead_Time: r.m.lead_time, MOQ: r.m.moq, Redondeo: r.m.rounding, Stock_Seguridad_Pct: Math.round(num(r.m.safety_pct) * 100),
+    Stock_Disponible: r.stock, Consumo_Total: Number(r.c.total.toFixed(4)), Diferencia: Number(r.diff.toFixed(4)),
+    Propuesta_Sugerida: Number(r.suggested.toFixed(4)), Decision_Compra: r.decision,
+    Proveedor: r.comp.provider || "", OC: r.comp.oc || "",
+    Stock_Final: Number(r.stockFinal.toFixed(4)), Costo_Unit_USD: r.cost, Inversion_USD: Number(r.invUsd.toFixed(2))
+  }))), "Analisis_MRP");
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mrp.rows.filter(r => r.decision > 0 || r.c.total > 0).map(r => ({
+    Codigo: r.m.code, Descripcion: r.m.name, UM: r.m.um, Decision_Mes: r.decision,
+    Compra_S1: num(r.comp.w1), Compra_S2: num(r.comp.w2), Compra_S3: num(r.comp.w3), Compra_S4: num(r.comp.w4), Compra_S5: num(r.comp.w5),
+    Inver_S1_USD: Number((num(r.comp.w1) * r.cost).toFixed(2)), Inver_S2_USD: Number((num(r.comp.w2) * r.cost).toFixed(2)),
+    Inver_S3_USD: Number((num(r.comp.w3) * r.cost).toFixed(2)), Inver_S4_USD: Number((num(r.comp.w4) * r.cost).toFixed(2)),
+    Inver_S5_USD: Number((num(r.comp.w5) * r.cost).toFixed(2))
+  }))), "Procura_Semanal");
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([...STATE.materials.values()].map(m => ({
+    Codigo: m.code, Descripcion: m.name, UM: m.um, Tipo: m.type,
+    Costo_Anterior_USD: num(m.prev_cost), Ultimo_Costo_USD: num(m.cost),
+    Actualizado: m.cost_updated_at || ""
+  }))), "Costos_Compra");
+
+  const bomFlat = [];
+  for (const [skuCode, items] of STATE.bom.entries()) {
+    const s = STATE.skus.get(skuCode);
+    for (const it of items) {
+      const m = STATE.materials.get(it.mat_code);
+      if (s && m) bomFlat.push({ Codigo_SKU: s.code, SKU: s.name, Codigo_Insumo: m.code, Insumo: m.name, UM: m.um, Cant_Por_Lote: it.qty_per_batch });
+    }
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bomFlat), "Formulas_BOM");
+
+  XLSX.writeFile(wb, `MRP-${planName.replace(/[^a-zA-Z0-9_-]/g, "_")}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+};
+
+boot();

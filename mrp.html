@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Planificación MRP · Alimentos Mida</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Baloo+2:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>
+  .wrap.mrp-wide { max-width: 1380px; }
+  .mrp-tabs {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 8px;
+  }
+  .mrp-tab {
+    border: 1.5px solid transparent; background: transparent; color: var(--muted);
+    padding: 8px 14px; border-radius: 8px; font-weight: 700; font-size: .88rem;
+    cursor: pointer; transition: .15s;
+  }
+  .mrp-tab:hover { background: var(--bg); color: var(--brand); }
+  .mrp-tab.active {
+    background: var(--navy); color: #fff; border-color: var(--navy);
+    box-shadow: inset 0 -3px 0 var(--yellow);
+  }
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 12px; margin-bottom: 18px;
+  }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-top: 4px solid var(--navy); border-radius: 12px; padding: 14px 16px;
+  }
+  .kpi-card.warn { border-top-color: var(--danger); }
+  .kpi-card.accent { border-top-color: var(--yellow); }
+  .kpi-card.ok { border-top-color: var(--ok); }
+  .kpi-label { font-size: .78rem; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: .4px; }
+  .kpi-val { font-family: "Baloo 2", sans-serif; font-size: 1.65rem; font-weight: 700; color: var(--ink); line-height: 1.2; margin-top: 4px; }
+  .kpi-sub { font-size: .8rem; color: var(--muted); margin-top: 2px; }
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 18px; }
+  .panel-card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px;
+  }
+  .panel-card h3 { margin: 0 0 12px; font-family: "Baloo 2", sans-serif; font-size: 1.1rem; color: var(--brand); }
+  .mrp-table th { font-size: .8rem; padding: 9px 10px; }
+  .mrp-table td { font-size: .86rem; padding: 7px 10px; vertical-align: middle; }
+  .mrp-table tbody tr { cursor: default; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cell-inp {
+    width: 88px; padding: 5px 7px !important; text-align: right;
+    font-size: .85rem; font-weight: 600; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--bg);
+  }
+  .cell-inp.wide { width: 140px; text-align: left; font-weight: 500; }
+  .cell-inp:focus { background: var(--surface); border-color: var(--brand); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 99px;
+    font-size: .74rem; font-weight: 700; white-space: nowrap;
+  }
+  .badge.ok { background: rgba(21,122,67,.12); color: var(--ok); }
+  .badge.deficit { background: rgba(179,38,30,.12); color: var(--danger); }
+  .badge.nocost { background: rgba(255,203,5,.35); color: var(--navy); }
+  .badge.mp { background: rgba(1,20,135,.12); color: var(--brand); }
+  .badge.me { background: rgba(255,203,5,.3); color: #7a5c00; }
+  .sync-pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px;
+    border-radius: 99px; font-size: .8rem; font-weight: 700;
+    background: rgba(255,255,255,.15); color: #fff;
+  }
+  .sync-pill.saving { background: var(--yellow); color: var(--navy); }
+  .sync-pill.err { background: var(--danger); color: #fff; }
+  .bom-layout { display: grid; grid-template-columns: 310px 1fr; gap: 16px; align-items: start; }
+  @media(max-width: 860px) { .bom-layout { grid-template-columns: 1fr; } }
+  .sku-list { max-height: 62vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .sku-item {
+    text-align: left; border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 11px; background: var(--bg); cursor: pointer; transition: .12s;
+  }
+  .sku-item:hover { border-color: var(--brand); }
+  .sku-item.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+  .sku-item.active .hint { color: #D5DAF7; }
+  .btn-sm { padding: 5px 10px; font-size: .8rem; }
+  .btn-danger { color: var(--danger); border-color: var(--danger); }
+  .btn-danger:hover { background: rgba(179,38,30,.08); }
+  .toggle-lbl {
+    display: inline-flex; align-items: center; gap: 7px; font-size: .86rem;
+    font-weight: 600; margin: 0; cursor: pointer; padding: 6px 10px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .empty-hero {
+    text-align: center; padding: 48px 20px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 14px;
+  }
+  .empty-hero h2 { font-size: 1.5rem; margin-bottom: 8px; }
+  .toast-box {
+    position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .toast {
+    background: var(--navy); color: #fff; padding: 11px 16px; border-radius: 10px;
+    border-left: 5px solid var(--yellow); font-weight: 600; font-size: .88rem;
+    box-shadow: 0 8px 24px rgba(0,0,0,.22); max-width: 360px;
+  }
+  .toast.err { border-left-color: #ff6b6b; background: #6b1510; }
+  .adv-col { display: none; }
+  .show-adv .adv-col { display: table-cell; }
+  .plan-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .plan-bar select {
+    background: rgba(255,255,255,.14); color: #fff; border: 1px solid rgba(255,255,255,.35);
+    padding: 6px 10px; border-radius: 8px; width: auto; font-weight: 600;
+  }
+  .plan-bar select option { color: #0B1033; background: #fff; }
+</style>
+</head>
+<body>
+<main class="wrap mrp-wide">
+
+<!-- Navegación superior compartida con admin.html -->
+<div class="topbar" style="justify-content:space-between;flex-wrap:wrap;gap:10px">
+  <nav id="admin_nav" style="display:flex;gap:8px;flex-wrap:wrap" hidden>
+    <a class="staff-btn" href="admin.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Proveedores</a>
+    <a class="staff-btn" href="mrp.html" style="background:var(--yellow);border-color:var(--yellow);color:var(--navy)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--navy)"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Planificación MRP</a>
+  </nav>
+  <a class="staff-btn" href="index.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>Ver formulario público</a>
+</div>
+
+<!-- Pantalla de login (misma sesión de Supabase que admin.html) -->
+<section id="login" style="max-width:380px;margin:60px auto" hidden>
+  <header class="top brand">
+    <img src="logo.png" alt="Logo de Quidy" width="84" height="84">
+    <div><h1>Planificación MRP</h1><p class="lead">Ingrese con su cuenta autorizada de Compras.</p></div>
+  </header>
+  <form id="lf">
+    <label>Correo<input type="email" id="em" required autocomplete="username"></label>
+    <label>Contraseña<input type="password" id="pw" required autocomplete="current-password"></label>
+    <div class="err" id="lerr" role="alert"></div>
+    <button class="primary" type="submit">Entrar</button>
+  </form>
+</section>
+
+<!-- Aplicación MRP -->
+<section id="app" hidden>
+  <header class="top brand" style="justify-content:space-between;flex-wrap:wrap;gap:14px">
+    <div style="display:flex;gap:16px;align-items:center">
+      <img src="logo.png" alt="Logo de Quidy" width="76" height="76">
+      <div>
+        <h1>Planificación y Procura MRP</h1>
+        <p class="lead" id="mrp_sub">Conectado a Supabase · Alimentos Mida</p>
+        <div class="plan-bar">
+          <select id="plan_sel" aria-label="Plan activo"></select>
+          <span id="sync_pill" class="sync-pill">Sincronizado ✓</span>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button id="btn_new_plan" class="primary" style="padding:9px 14px;font-size:.9rem">+ Nueva Planificación</button>
+      <label class="staff-btn" style="margin:0;cursor:pointer;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.35)">
+        Importar Excel (.xlsx)
+        <input type="file" id="inp_xlsx" accept=".xlsx,.xls" hidden>
+      </label>
+      <button id="btn_export" style="color:#fff;border-color:rgba(255,255,255,.45)">Exportar Excel</button>
+      <button id="btn_out" style="color:#fff;border-color:rgba(255,255,255,.45)">Salir</button>
+    </div>
+  </header>
+
+  <!-- Pestañas de módulos -->
+  <div class="mrp-tabs" id="tabs">
+    <button class="mrp-tab active" data-tab="dashboard">Dashboard</button>
+    <button class="mrp-tab" data-tab="plan">Plan de Producción</button>
+    <button class="mrp-tab" data-tab="analisis">Análisis MRP</button>
+    <button class="mrp-tab" data-tab="procura">Procura Semanal</button>
+    <button class="mrp-tab" data-tab="catalogo">Catálogo e Inventario</button>
+    <button class="mrp-tab" data-tab="costos">Costos de Compra</button>
+    <button class="mrp-tab" data-tab="formulas">Fórmulas (BOM)</button>
+  </div>
+
+  <!-- Contenedor dinámico -->
+  <div id="view"></div>
+</section>
+
+<!-- Datalist global con proveedores aprobados de Supabase -->
+<datalist id="dl_proveedores"></datalist>
+
+<!-- Modal reutilizable -->
+<dialog id="dlg"></dialog>
+<div class="toast-box" id="toasts"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="mrp.js"></script>
+</body>
+</html>

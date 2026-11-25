@@ -12,7 +12,13 @@
 </head>
 <body>
 <main class="wrap wide">
-<div class="topbar"><a class="staff-btn" href="index.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>Ver formulario público</a></div>
+<div class="topbar" style="justify-content:space-between;flex-wrap:wrap;gap:10px">
+  <nav id="admin_nav" style="display:flex;gap:8px;flex-wrap:wrap" hidden>
+    <a class="staff-btn" href="admin.html" style="background:var(--yellow);border-color:var(--yellow);color:var(--navy)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--navy)"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Proveedores</a>
+    <a class="staff-btn" href="mrp.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Planificación MRP</a>
+  </nav>
+  <a class="staff-btn" href="index.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>Ver formulario público</a>
+</div>
 
 <section id="login" style="max-width:380px;margin:60px auto" hidden>
   <header class="top brand"><img src="logo.png" alt="Logo de Quidy" width="84" height="84"><div><h1>Panel de compras</h1><p class="lead">Ingrese con su cuenta autorizada.</p></div></header>
@@ -73,7 +79,7 @@ function computeDup() {
 
 async function boot() {
   const { data: { session } } = await sb.auth.getSession();
-  $("#login").hidden = !!session; $("#app").hidden = !session;
+  $("#login").hidden = !!session; $("#app").hidden = !session; $("#admin_nav").hidden = !session;
   if (session) load();
 }
 $("#lf").onsubmit = async e => {
