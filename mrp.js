@@ -1955,6 +1955,7 @@ function renderFormulas(v) {
           <div class="hint">Código: <code>${esc(sel.code)}</code> · Categoría: <strong>${esc(sel.category)}</strong></div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-sm primary" id="btn_imp_bom" title="Cargar ingredientes desde Excel (ej. Lista de materiales SAP)">Cargar Fórmula (Excel)</button>
           <button class="btn-sm" id="btn_dup_sku">Duplicar Fórmula</button>
           <button class="btn-sm btn-danger" id="btn_del_sku">Eliminar Fórmula</button>
         </div>
@@ -2120,6 +2121,7 @@ function renderFormulas(v) {
       };
     });
 
+    $("#btn_imp_bom").onclick = () => openImportBomModal(sel, () => { paintList(); paintDetail(); });
     $("#btn_dup_sku").onclick = () => openDuplicateSkuModal(sel);
     $("#btn_del_sku").onclick = () => openDeleteSkuModal(sel);
   };
@@ -2129,6 +2131,364 @@ function renderFormulas(v) {
   $("#fb_q").oninput = e => { STATE.fBom.q = e.target.value; paintList(); };
   $("#fb_cat").onchange = e => { STATE.fBom.cat = e.target.value; paintList(); };
   $("#btn_new_sku").onclick = () => openNewSkuModal();
+}
+
+// -------------------- 7B. CARGA DE FÓRMULA (BOM) DESDE EXCEL (EJ. LISTA DE MATERIALES SAP) --------------------
+function isNonMaterialLine(code, name, um) {
+  const c = String(code || "").trim().toUpperCase();
+  const n = normText(name);
+  if (/^(MO|CF)\d+/.test(c)) return true;
+  if (/(mano de obra|carga fabril|horas hombre|hora maquina|gasto fabril|depreciacion|energia electrica)/.test(n)) return true;
+  if (!um && /^(MO|CF|GG|CIF)/i.test(c)) return true;
+  return false;
+}
+
+function guessMaterialType(name, um) {
+  const n = normText(name);
+  const u = normText(um);
+  if (/(unidad|und|pza|pieza|rollo|caja|tapa|bolsa|envase|etiqueta|frasco|botella|bobina|strech|stretch|carton|embalaje|empaque|saco|pote|galon|tambor|bandeja|cinta)/.test(u + " " + n)) {
+    return "ME";
+  }
+  return "MP";
+}
+
+function normalizeUm(rawUm) {
+  const s = String(rawUm || "").trim();
+  if (!s) return "Kg";
+  const low = s.toLowerCase();
+  if (low === "kg" || low === "kgs" || low === "kilo" || low === "kilos") return "Kg";
+  if (low === "l" || low === "lt" || low === "lts" || low === "litro" || low === "litros") return "L";
+  if (low === "unidad" || low === "unidades" || low === "und" || low === "unds" || low === "pza") return "Und";
+  return s;
+}
+
+function parseBomExcelFile(wb) {
+  const sheetName = wb.SheetNames.find(n => /lista|material|formula|bom|receta/i.test(n)) || wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: null });
+  if (!rows.length) return { sheetName, items: [], skippedEmpty: 0 };
+
+  // Detectar fila de encabezados (compatible con SAP "Lista de materiales.xlsx" y plantillas genéricas)
+  let headerIdx = -1;
+  let colMap = {};
+  const matchers = {
+    code: /^(n|no|n°|nro|numero|codigo|cod|code|articulo|item|codigo insumo)$/,
+    name: /^(descripcion|nombre|insumo|material|articulo descripcion|description)$/,
+    qty: /^(cantidad|cant|cant lote|cant por lote|cantidad por lote|qty|peso)$/,
+    um: /^(nombre de unidad de medida|unidad de medida|um|u m|unidad|medida)$/
+  };
+
+  for (let r = 0; r < Math.min(15, rows.length); r++) {
+    const row = rows[r] || [];
+    const temp = {};
+    for (let c = 0; c < row.length; c++) {
+      const rawH = String(row[c] ?? "").trim();
+      const h = normText(rawH);
+      const rawLow = rawH.toLowerCase();
+      if (!rawH) continue;
+      if (temp.code === undefined && (rawLow === "nº" || rawLow === "n°" || matchers.code.test(h) || h.startsWith("cod"))) {
+        temp.code = c;
+      } else if (temp.name === undefined && (matchers.name.test(h) || h.startsWith("desc"))) {
+        temp.name = c;
+      } else if (temp.qty === undefined && (matchers.qty.test(h) || h.startsWith("cant"))) {
+        temp.qty = c;
+      } else if (temp.um === undefined && (matchers.um.test(h) || h.includes("unidad de medida"))) {
+        temp.um = c;
+      }
+    }
+    if (temp.code !== undefined && temp.qty !== undefined) {
+      headerIdx = r;
+      colMap = temp;
+      break;
+    }
+  }
+
+  // Respaldo: estructura exacta de "Lista de materiales.xlsx" (Col C=Nº, Col D=Descripción, Col E=Cantidad, Col F=UM)
+  if (headerIdx < 0) {
+    headerIdx = 0;
+    colMap = { code: 2, name: 3, qty: 4, um: 5 };
+  }
+
+  const items = [];
+  let skippedEmpty = 0;
+  for (let r = headerIdx + 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row) continue;
+    const code = row[colMap.code] != null ? String(row[colMap.code]).trim() : "";
+    const name = colMap.name !== undefined && row[colMap.name] != null ? String(row[colMap.name]).trim() : "";
+    const qty = cleanNum(row[colMap.qty]);
+    const rawUm = colMap.um !== undefined && row[colMap.um] != null ? String(row[colMap.um]).trim() : "";
+
+    // Ignorar filas vacías o sin código / cantidad <= 0
+    if (!code || code === "0" || qty <= 0) {
+      skippedEmpty++;
+      continue;
+    }
+
+    items.push({
+      rowNum: r + 1,
+      code,
+      name: name || code,
+      qty,
+      rawUm,
+      um: normalizeUm(rawUm)
+    });
+  }
+  return { sheetName, items, skippedEmpty };
+}
+
+function openImportBomModal(sku, onDone) {
+  const d = $("#dlg");
+  d.classList.add("wide-dlg");
+  const closeDlg = () => { d.classList.remove("wide-dlg"); d.close(); };
+  d.onclose = () => d.classList.remove("wide-dlg");
+
+  let analyzed = [];
+  let meta = { sheetName: "", fileName: "", skippedEmpty: 0 };
+  let mode = "replace"; // "replace" o "merge"
+
+  const renderUploadStep = () => {
+    const curCount = (STATE.bom.get(sku.code) || []).length;
+    d.innerHTML = `
+      <h2>Cargar Fórmula desde Excel</h2>
+      <p class="hint" style="margin:0 0 10px">Producto destino: <strong>${esc(sku.name)}</strong> (<code>${esc(sku.code)}</code> · Lote ${fmt(sku.batch_size_kg, 0)} kg · ${curCount} insumo(s) actuales)</p>
+      <p class="notice" style="margin:0 0 14px">
+        Compatible directamente con el archivo <strong>Lista de materiales.xlsx</strong> (SAP) o cualquier Excel con columnas <strong>Nº / Código</strong>, <strong>Descripción</strong>, <strong>Cantidad</strong> y <strong>Unidad de medida</strong>. Solo se toman los datos necesarios para la receta; costos, almacenes y líneas de <em>Mano de Obra / Carga Fabril</em> se filtran automáticamente.
+      </p>
+      <label>Seleccione el archivo Excel (.xlsx / .xls / .csv) *
+        <input type="file" id="bm_file" accept=".xlsx,.xls,.csv">
+      </label>
+      <div class="err" id="bm_err"></div>
+      <div class="bar" style="margin-top:14px">
+        <button type="button" id="bm_cls" style="margin-left:auto">Cancelar</button>
+      </div>`;
+
+    $("#bm_cls").onclick = closeDlg;
+    $("#bm_file").onchange = async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      $("#bm_err").textContent = "";
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array" });
+        const res = parseBomExcelFile(wb);
+        if (!res.items.length) {
+          $("#bm_err").textContent = "No se encontraron líneas con Código y Cantidad > 0.";
+          return;
+        }
+        meta = { sheetName: res.sheetName, fileName: file.name, skippedEmpty: res.skippedEmpty };
+
+        const seen = new Map();
+        analyzed = res.items.map((it, idx) => {
+          const existing = STATE.materials.get(it.code) || null;
+          const nonMat = isNonMaterialLine(it.code, it.name, it.rawUm);
+          const isDup = seen.has(it.code);
+          if (!isDup) seen.set(it.code, it.rowNum);
+
+          let status = "OK";
+          let action = "include";
+          let note = existing ? `En catálogo: ${existing.name}` : "";
+
+          if (isDup) {
+            status = "DUP";
+            action = "sum";
+            note = `Código repetido en el archivo (fila ${seen.get(it.code)}).`;
+          } else if (nonMat) {
+            status = "NO_MATERIAL";
+            action = "skip";
+            note = "Línea de costo indirecto / mano de obra (omitida por defecto).";
+          } else if (!existing) {
+            status = "FALTANTE";
+            const gType = guessMaterialType(it.name, it.rawUm);
+            action = gType === "ME" ? "create_me" : "create_mp";
+            note = `No existe en catálogo · se creará como ${gType} si se aprueba.`;
+          } else if (normText(existing.name) !== normText(it.name)) {
+            note = `En catálogo figura como "${existing.name}" (se usará el catálogo).`;
+          }
+
+          return { idx, it, existing, status, action, note };
+        });
+
+        renderReviewStep();
+      } catch (err) {
+        console.error(err);
+        $("#bm_err").textContent = "Error al leer el archivo: " + (err.message || err);
+      }
+    };
+  };
+
+  const renderReviewStep = () => {
+    const activeItems = analyzed.filter(x => x.action !== "skip");
+    const newMatsCount = analyzed.filter(x => x.action === "create_mp" || x.action === "create_me").length;
+    const nonMatCount = analyzed.filter(x => x.status === "NO_MATERIAL").length;
+
+    // Calcular balance de masa MP estimado (kg/l)
+    let estKg = 0;
+    for (const x of activeItems) {
+      const mType = x.existing ? x.existing.type : (x.action === "create_me" ? "ME" : "MP");
+      const mUm = x.existing ? x.existing.um : x.it.um;
+      if (mType === "MP" && ["kg", "l", "lt", "lts"].includes(String(mUm || "").toLowerCase())) {
+        estKg += x.it.qty;
+      }
+    }
+    const massOk = Math.abs(estKg - num(sku.batch_size_kg)) <= Math.max(1, num(sku.batch_size_kg) * 0.01);
+
+    const badgeFor = st => {
+      if (st === "OK") return `<span class="badge ok">EN CATÁLOGO</span>`;
+      if (st === "FALTANTE") return `<span class="badge warn">NO EN CATÁLOGO</span>`;
+      if (st === "NO_MATERIAL") return `<span class="badge info">MO / CARGA FABRIL</span>`;
+      return `<span class="badge warn">REPETIDO</span>`;
+    };
+
+    const actionOptions = x => {
+      if (x.status === "OK") {
+        return `<option value="include" ${x.action === "include" ? "selected" : ""}>Incluir en fórmula</option>
+                <option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir</option>`;
+      }
+      if (x.status === "FALTANTE") {
+        return `<option value="create_mp" ${x.action === "create_mp" ? "selected" : ""}>Crear como MP e incluir</option>
+                <option value="create_me" ${x.action === "create_me" ? "selected" : ""}>Crear como ME e incluir</option>
+                <option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir</option>`;
+      }
+      if (x.status === "NO_MATERIAL") {
+        return `<option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir (recomendado)</option>
+                <option value="create_mp" ${x.action === "create_mp" ? "selected" : ""}>Crear como MP e incluir</option>
+                <option value="create_me" ${x.action === "create_me" ? "selected" : ""}>Crear como ME e incluir</option>`;
+      }
+      return `<option value="sum" ${x.action === "sum" ? "selected" : ""}>Sumar cantidad al código</option>
+              <option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir repetido</option>`;
+    };
+
+    d.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div>
+          <h2 style="margin:0">Validar Fórmula · ${esc(sku.name)}</h2>
+          <div class="hint">Archivo: <strong>${esc(meta.fileName)}</strong> · ${analyzed.length} líneas detectadas${nonMatCount ? ` · ${nonMatCount} de MO/Carga Fabril filtradas` : ""}</div>
+        </div>
+        <button type="button" class="btn-sm" id="bm_back">Cambiar archivo</button>
+      </div>
+
+      <div class="kpi-grid" style="margin-bottom:12px">
+        <div class="kpi-card"><div class="kpi-label">Insumos a Cargar</div><div class="kpi-val">${activeItems.length}</div><div class="kpi-sub">${newMatsCount ? `${newMatsCount} nuevo(s) al catálogo` : "Todos existen en catálogo ✓"}</div></div>
+        <div class="kpi-card ${massOk ? "ok" : "warn"}"><div class="kpi-label">Balance Masa MP</div><div class="kpi-val">${fmt(estKg, 2)} kg</div><div class="kpi-sub">Lote SKU: ${fmt(sku.batch_size_kg, 0)} kg · ${massOk ? "OK ✓" : "Revisar lote o cantidades"}</div></div>
+        <div class="kpi-card accent">
+          <div class="kpi-label">Modo de Carga</div>
+          <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px;font-size:.83rem">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:600"><input type="radio" name="bm_mode" value="replace" ${mode === "replace" ? "checked" : ""}> Reemplazar receta actual</label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:600"><input type="radio" name="bm_mode" value="merge" ${mode === "merge" ? "checked" : ""}> Combinar con receta actual</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="tablebox" style="max-height:44vh;overflow-y:auto"><table class="mrp-table">
+        <thead><tr>
+          <th>Fila</th><th>Estado</th><th>Código</th><th>Descripción en Archivo</th><th class="num">Cantidad / Lote</th><th>UM</th><th>Acción</th>
+        </tr></thead>
+        <tbody>
+          ${analyzed.map(x => `<tr>
+            <td class="hint">#${x.it.rowNum}</td>
+            <td>${badgeFor(x.status)}</td>
+            <td><code>${esc(x.it.code)}</code></td>
+            <td>
+              <strong>${esc(x.it.name)}</strong>
+              ${x.note ? `<div class="hint">${esc(x.note)}</div>` : ""}
+            </td>
+            <td class="num"><strong>${fmt(x.it.qty, 3)}</strong></td>
+            <td>${esc(x.existing ? x.existing.um : (x.it.rawUm || "—"))}</td>
+            <td><select class="bulk-sel" data-bmidx="${x.idx}">${actionOptions(x)}</select></td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div>
+
+      <div class="err" id="bm_save_err"></div>
+      <div class="bar" style="margin-top:14px">
+        <button type="button" class="primary" id="bm_apply" ${activeItems.length === 0 ? "disabled" : ""}>Cargar ${activeItems.length} Insumo(s) a la Fórmula</button>
+        <button type="button" id="bm_cls2" style="margin-left:auto">Cancelar</button>
+      </div>`;
+
+    $("#bm_cls2").onclick = closeDlg;
+    $("#bm_back").onclick = renderUploadStep;
+    d.querySelectorAll("input[name=bm_mode]").forEach(r => r.onchange = () => { mode = r.value; });
+    d.querySelectorAll("[data-bmidx]").forEach(sel => {
+      sel.onchange = () => {
+        analyzed[Number(sel.dataset.bmidx)].action = sel.value;
+        renderReviewStep();
+      };
+    });
+
+    $("#bm_apply").onclick = async () => {
+      const btn = $("#bm_apply");
+      btn.disabled = true; btn.textContent = "Guardando en Supabase…";
+      $("#bm_save_err").textContent = "";
+      try {
+        const now = new Date().toISOString();
+        const newMats = [];
+        const qtyByMat = new Map();
+
+        for (const x of analyzed) {
+          if (x.action === "skip") continue;
+          const c = x.it.code;
+          if (!STATE.materials.has(c) && (x.action === "create_mp" || x.action === "create_me")) {
+            const rec = {
+              code: c,
+              name: x.it.name,
+              um: x.it.um || "Kg",
+              type: x.action === "create_me" ? "ME" : "MP",
+              lead_time: 3, moq: 1, rounding: 1, safety_pct: 0.2,
+              stock: 0, cost: 0, prev_cost: 0, updated_at: now
+            };
+            newMats.push(rec);
+            STATE.materials.set(c, rec);
+          }
+          if (STATE.materials.has(c)) {
+            qtyByMat.set(c, (qtyByMat.get(c) || 0) + x.it.qty);
+          }
+        }
+
+        // 1. Crear materiales faltantes si el usuario los aprobó
+        if (newMats.length) {
+          await batchUpsert("mrp_materiales", newMats, "code");
+        }
+
+        // 2. Si es modo Reemplazar, limpiar ingredientes previos del SKU
+        if (mode === "replace") {
+          const { error: delErr } = await sb.from("mrp_bom").delete().eq("sku_code", sku.code);
+          if (delErr) throw delErr;
+        }
+
+        // 3. Guardar líneas de receta
+        const bomRows = [...qtyByMat.entries()].map(([mat_code, qty_per_batch]) => ({
+          sku_code: sku.code,
+          mat_code,
+          qty_per_batch
+        }));
+        if (bomRows.length) {
+          await batchUpsert("mrp_bom", bomRows, "sku_code,mat_code");
+        }
+
+        // 4. Actualizar estado local
+        if (mode === "replace") {
+          STATE.bom.set(sku.code, bomRows.map(b => ({ mat_code: b.mat_code, qty_per_batch: b.qty_per_batch })));
+        } else {
+          const curArr = STATE.bom.get(sku.code) || [];
+          const mapCur = new Map(curArr.map(i => [i.mat_code, i.qty_per_batch]));
+          for (const b of bomRows) mapCur.set(b.mat_code, b.qty_per_batch);
+          STATE.bom.set(sku.code, [...mapCur.entries()].map(([mat_code, qty_per_batch]) => ({ mat_code, qty_per_batch })));
+        }
+
+        closeDlg();
+        toast(`Fórmula cargada: ${bomRows.length} insumo(s)${newMats.length ? ` (${newMats.length} creado(s) en catálogo)` : ""}.`);
+        if (onDone) onDone(); else renderView();
+      } catch (err) {
+        console.error(err);
+        $("#bm_save_err").textContent = "Error al guardar en Supabase: " + (err.message || err);
+        btn.disabled = false;
+        btn.textContent = "Reintentar";
+      }
+    };
+  };
+
+  renderUploadStep();
+  d.showModal();
 }
 
 function openNewSkuModal() {
