@@ -22,7 +22,7 @@ const STATE = {
   proveedores: [],        // nombres de proveedores aprobados
   selectedSku: null,
   // Filtros UI persistentes en sesión
-  fPlan: { q: "", cat: "" },
+  fPlan: { q: "", cat: "", onlyWithQty: false },
   fAnalisis: { q: "", type: "", onlyActive: true, showAdv: false },
   fProcura: { q: "", onlyActive: true },
   fCatalogo: { q: "", type: "" },
@@ -440,6 +440,7 @@ function renderPlan(v) {
     <div class="bar">
       <input type="search" id="fp_q" placeholder="Buscar SKU o código…" value="${esc(STATE.fPlan.q)}">
       <select id="fp_cat"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === STATE.fPlan.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+      <label class="toggle-lbl"><input type="checkbox" id="fp_qty" ${STATE.fPlan.onlyWithQty ? "checked" : ""}> Solo con cantidad en plan</label>
       <button id="btn_prorratear_all">Prorratear todo en 4 semanas</button>
     </div>
     <div class="tablebox"><table class="mrp-table">
@@ -454,10 +455,16 @@ function renderPlan(v) {
 
   const paintRows = () => {
     const q = STATE.fPlan.q.toLowerCase().trim();
-    const list = [...STATE.skus.values()].filter(s =>
-      (!STATE.fPlan.cat || s.category === STATE.fPlan.cat) &&
-      (!q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q))
-    );
+    const list = [...STATE.skus.values()].filter(s => {
+      if (STATE.fPlan.cat && s.category !== STATE.fPlan.cat) return false;
+      if (q && !(s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q))) return false;
+      if (STATE.fPlan.onlyWithQty) {
+        const pi = getPlanItem(s.code);
+        const totW = num(pi.w1) + num(pi.w2) + num(pi.w3) + num(pi.w4) + num(pi.w5);
+        if (num(pi.plan_qty) <= 0 && totW <= 0) return false;
+      }
+      return true;
+    });
     const tb = $("#fp_body");
     tb.innerHTML = list.map(s => {
       const pi = getPlanItem(s.code);
@@ -507,6 +514,7 @@ function renderPlan(v) {
   paintRows();
   $("#fp_q").oninput = e => { STATE.fPlan.q = e.target.value; paintRows(); };
   $("#fp_cat").onchange = e => { STATE.fPlan.cat = e.target.value; paintRows(); };
+  $("#fp_qty").onchange = e => { STATE.fPlan.onlyWithQty = e.target.checked; paintRows(); };
 
   $("#btn_prorratear_all").onclick = async () => {
     const updates = [];
