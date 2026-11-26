@@ -135,6 +135,20 @@
   }
   .combo-item:last-child { border-bottom: none; }
   .combo-item:hover, .combo-item.hi { background: var(--bg); color: var(--brand); }
+  dialog.wide-dlg { width: min(1100px, 96vw); }
+  .bulk-pills { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 12px; }
+  .bulk-pill {
+    border: 1.5px solid var(--line); background: var(--surface); color: var(--ink);
+    padding: 6px 12px; border-radius: 99px; font-size: .82rem; font-weight: 700; cursor: pointer;
+  }
+  .bulk-pill.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+  .bulk-pill.warn { border-color: #d97706; color: #92400e; }
+  .bulk-pill.warn.on { background: #d97706; color: #fff; }
+  .bulk-pill.err { border-color: var(--danger); color: var(--danger); }
+  .bulk-pill.err.on { background: var(--danger); color: #fff; }
+  .bulk-sel { padding: 5px 8px !important; font-size: .8rem; width: auto !important; min-width: 190px; }
+  .badge.warn { background: rgba(245,158,11,.18); color: #92400e; }
+  .badge.info { background: rgba(1,20,135,.1); color: var(--brand); }
 </style>
 </head>
 <body>

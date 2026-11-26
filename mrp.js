@@ -1099,6 +1099,7 @@ function renderCatalogo(v) {
         <option value="ME" ${STATE.fCatalogo.type === "ME" ? "selected" : ""}>Material Empaque (ME)</option>
       </select>
       <button id="btn_new_mat" class="primary" style="padding:8px 14px;font-size:.86rem">+ Nuevo Insumo</button>
+      <button id="btn_bulk_mat" style="padding:8px 14px;font-size:.86rem">Carga Masiva (Excel / CSV)</button>
     </div>
     <div class="tablebox"><table class="mrp-table">
       <thead><tr>
@@ -1174,6 +1175,7 @@ function renderCatalogo(v) {
   $("#fc_q").oninput = e => { STATE.fCatalogo.q = e.target.value; paintRows(); };
   $("#fc_type").onchange = e => { STATE.fCatalogo.type = e.target.value; paintRows(); };
   $("#btn_new_mat").onclick = () => openNewMaterialModal(paintRows);
+  $("#btn_bulk_mat").onclick = () => openBulkMaterialModal(paintRows);
 }
 
 function openNewMaterialModal(onCreated) {
@@ -1291,6 +1293,473 @@ function openEditMaterialModal(code, onSaved) {
     toast(`Insumo "${name}" actualizado.`);
     if (onSaved) onSaved(); else renderView();
   };
+}
+
+// -------------------- 5B. CARGA MASIVA DE INSUMOS CON VALIDADOR DE CONFLICTOS --------------------
+function normText(t) {
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function downloadBulkMaterialTemplate() {
+  const wb = XLSX.utils.book_new();
+  const sample = [
+    {
+      Codigo: "105099",
+      Descripcion: "EJEMPLO INSUMO NUEVO",
+      UM: "Kg",
+      Tipo: "MP",
+      Stock_Disponible: 150,
+      Lead_Time: 3,
+      MOQ: 25,
+      Redondeo: 5,
+      Stock_Seguridad_Pct: 20
+    },
+    {
+      Codigo: "105009",
+      Descripcion: "AZUCAR",
+      UM: "Kg",
+      Tipo: "MP",
+      Stock_Disponible: 500,
+      Lead_Time: "",
+      MOQ: "",
+      Redondeo: "",
+      Stock_Seguridad_Pct: ""
+    }
+  ];
+  const ws = XLSX.utils.json_to_sheet(sample);
+  ws["!cols"] = [{ wch: 14 }, { wch: 32 }, { wch: 10 }, { wch: 8 }, { wch: 18 }, { wch: 12 }, { wch: 10 }, { wch: 11 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(wb, ws, "Carga_Insumos");
+  XLSX.writeFile(wb, "Plantilla-Carga-Masiva-Insumos.xlsx");
+  toast("Plantilla descargada. Los campos vacíos en insumos existentes conservan su valor actual.");
+}
+
+function parseBulkMaterialWorkbook(wb) {
+  // Prioriza hojas con nombre de inventario/insumos o usa la primera hoja
+  const preferred = wb.SheetNames.find(n => /carga|insumo|inventario|catalogo|analisis|material/i.test(n)) || wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[preferred], { header: 1, defval: null });
+  if (!rows.length) return { sheetName: preferred, parsed: [], invalid: 0 };
+
+  // Detectar fila de encabezados buscando columnas típicas en las primeras 12 filas
+  let headerRowIdx = -1;
+  let colMap = {};
+  const matchers = {
+    code: /^(codigo|cod|code|cod\.|id|sku|articulo|art)$/,
+    name: /^(descripcion|nombre|insumo|producto|material|detalle|description|name)$/,
+    um: /^(um|u\.m\.|unidad|unidad de medida|und|medida)$/,
+    type: /^(tipo|clase|categoria|mp\/me|type)$/,
+    stock: /^(stock|stock disponible|inventario|inventario disponible|disponible|cantidad|existencia|saldo)$/,
+    lead_time: /^(lead time|lead time dias|lead|tiempo entrega|lt)$/,
+    moq: /^(moq|volumen de compra minima|compra minima|minimo)$/,
+    rounding: /^(redondeo|valor de redondeo|red|multiplo)$/,
+    safety_pct: /^(stock seguridad|stock seguridad pct|ss|stock seg|seguridad)$/
+  };
+
+  for (let r = 0; r < Math.min(12, rows.length); r++) {
+    const row = rows[r] || [];
+    const temp = {};
+    for (let c = 0; c < row.length; c++) {
+      const h = normText(row[c]).replace(/%/g, "").trim();
+      if (!h) continue;
+      for (const [k, rx] of Object.entries(matchers)) {
+        if (temp[k] === undefined && (rx.test(h) || (k === "code" && h.startsWith("cod")) || (k === "name" && h.startsWith("desc")) || (k === "stock" && (h.includes("stock disp") || h.includes("inventario disp"))))) {
+          temp[k] = c;
+        }
+      }
+    }
+    if (temp.code !== undefined && temp.name !== undefined) {
+      headerRowIdx = r;
+      colMap = temp;
+      break;
+    }
+  }
+
+  // Respaldo si no tiene encabezados estándar: asumir Col A=Código, Col B=Descripción, Col C=UM, Col D=Stock
+  if (headerRowIdx < 0) {
+    headerRowIdx = 0;
+    colMap = { code: 0, name: 1, um: 2, stock: 3 };
+  }
+
+  const parsed = [];
+  let invalid = 0;
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.every(v => v === null || v === undefined || String(v).trim() === "")) continue;
+    const rawCode = row[colMap.code];
+    const rawName = row[colMap.name];
+    const code = rawCode != null ? String(rawCode).trim() : "";
+    const name = rawName != null ? String(rawName).trim() : "";
+
+    // Ignorar encabezados de categoría o ceros
+    if (!code || code === "0" || !name || name === "0") {
+      invalid++;
+      continue;
+    }
+
+    const hasVal = idx => idx !== undefined && row[idx] !== null && row[idx] !== undefined && String(row[idx]).trim() !== "";
+    const rawType = hasVal(colMap.type) ? String(row[colMap.type]).trim().toUpperCase() : "";
+    let safetyVal = null;
+    if (hasVal(colMap.safety_pct)) {
+      const sv = cleanNum(row[colMap.safety_pct]);
+      safetyVal = sv > 1 ? sv / 100 : sv;
+    }
+
+    parsed.push({
+      rowNum: r + 1,
+      code,
+      name,
+      um: hasVal(colMap.um) ? String(row[colMap.um]).trim() : null,
+      type: ["MP", "ME"].includes(rawType) ? rawType : null,
+      stock: hasVal(colMap.stock) ? Math.max(0, cleanNum(row[colMap.stock])) : null,
+      lead_time: hasVal(colMap.lead_time) ? Math.max(0, cleanNum(row[colMap.lead_time])) : null,
+      moq: hasVal(colMap.moq) ? Math.max(0, cleanNum(row[colMap.moq])) : null,
+      rounding: hasVal(colMap.rounding) ? Math.max(0.01, cleanNum(row[colMap.rounding])) : null,
+      safety_pct: safetyVal !== null ? Math.max(0, safetyVal) : null
+    });
+  }
+  return { sheetName: preferred, parsed, invalid };
+}
+
+function analyzeBulkMaterials(parsedRows) {
+  // Índice de nombres normalizados en la base de datos actual
+  const dbByNormName = new Map(); // normName -> [mat, ...]
+  for (const m of STATE.materials.values()) {
+    const nk = normText(m.name);
+    if (!nk) continue;
+    if (!dbByNormName.has(nk)) dbByNormName.set(nk, []);
+    dbByNormName.get(nk).push(m);
+  }
+
+  const seenCodes = new Map();
+  const seenNames = new Map();
+  const analyzed = [];
+
+  for (let idx = 0; idx < parsedRows.length; idx++) {
+    const item = parsedRows[idx];
+    const nk = normText(item.name);
+    const existingByCode = STATE.materials.get(item.code) || null;
+    const existingByNameList = (dbByNormName.get(nk) || []).filter(m => m.code !== item.code);
+
+    let status = "NUEVO";
+    let action = "create";
+    let detail = "Insumo nuevo (se creará)";
+    let conflictTarget = null;
+
+    if (seenCodes.has(item.code)) {
+      status = "DUP_ARCHIVO";
+      action = "skip";
+      detail = `Código repetido dentro del mismo archivo (ya apareció en fila ${seenCodes.get(item.code)}).`;
+    } else if (existingByCode) {
+      const existingNorm = normText(existingByCode.name);
+      if (existingNorm === nk) {
+        status = "ACTUALIZAR";
+        action = "update";
+        const stInfo = item.stock !== null ? `Stock: ${fmt(existingByCode.stock)} → ${fmt(item.stock)}` : "Sin cambio de stock";
+        detail = `Coincidencia exacta · ${stInfo}`;
+      } else {
+        status = "CONFLICTO_CODIGO";
+        action = "keep_current"; // Seguro por defecto: el usuario valida qué se queda
+        conflictTarget = existingByCode;
+        detail = `Código ya existe en BD como "${existingByCode.name}".`;
+      }
+    } else if (existingByNameList.length > 0) {
+      status = "DUP_NOMBRE";
+      action = "skip"; // Seguro por defecto: evitar duplicar el mismo artículo con otro código
+      conflictTarget = existingByNameList[0];
+      detail = `Nombre ya existe en BD bajo código ${conflictTarget.code} ("${conflictTarget.name}").`;
+    } else if (nk && seenNames.has(nk)) {
+      status = "DUP_ARCHIVO";
+      action = "skip";
+      detail = `Nombre repetido en el archivo con otro código (fila ${seenNames.get(nk)}).`;
+    }
+
+    if (!seenCodes.has(item.code)) seenCodes.set(item.code, item.rowNum);
+    if (nk && !seenNames.has(nk)) seenNames.set(nk, item.rowNum);
+
+    analyzed.push({ idx, item, status, action, detail, existingByCode, conflictTarget });
+  }
+
+  return analyzed;
+}
+
+function openBulkMaterialModal(onDone) {
+  const d = $("#dlg");
+  d.classList.add("wide-dlg");
+  const closeDlg = () => { d.classList.remove("wide-dlg"); d.close(); };
+  d.onclose = () => d.classList.remove("wide-dlg");
+
+  let analyzed = [];
+  let meta = { sheetName: "", invalid: 0, fileName: "" };
+  let filterMode = "ALL"; // ALL, CONFLICTS, NUEVO, ACTUALIZAR
+
+  const renderUploadStep = () => {
+    d.innerHTML = `
+      <h2>Carga Masiva de Insumos e Inventario</h2>
+      <p class="notice" style="margin:8px 0 14px">
+        <strong>Carga segura (no destructiva):</strong> Los <strong>${STATE.materials.size}</strong> insumos actuales que NO aparezcan en el archivo se mantendrán intactos. Antes de guardar, el sistema validará códigos repetidos, cambios de descripción y posibles duplicados por nombre para que usted decida qué se queda.
+      </p>
+      <div class="bar" style="margin-bottom:14px">
+        <button type="button" id="bk_tpl">Descargar Plantilla Excel (.xlsx)</button>
+        <span class="hint">También acepta cualquier Excel/CSV con columnas Código, Descripción, UM, Tipo y Stock.</span>
+      </div>
+      <label>Seleccione el archivo Excel (.xlsx / .xls) o CSV *
+        <input type="file" id="bk_file" accept=".xlsx,.xls,.csv">
+      </label>
+      <div class="err" id="bk_err"></div>
+      <div class="bar" style="margin-top:14px">
+        <button type="button" id="bk_cls" style="margin-left:auto">Cerrar</button>
+      </div>`;
+
+    $("#bk_cls").onclick = closeDlg;
+    $("#bk_tpl").onclick = downloadBulkMaterialTemplate;
+    $("#bk_file").onchange = async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      $("#bk_err").textContent = "";
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array" });
+        const res = parseBulkMaterialWorkbook(wb);
+        if (!res.parsed.length) {
+          $("#bk_err").textContent = "No se encontraron filas válidas (se requiere al menos Código y Descripción).";
+          return;
+        }
+        meta = { sheetName: res.sheetName, invalid: res.invalid, fileName: file.name };
+        analyzed = analyzeBulkMaterials(res.parsed);
+        const hasConflicts = analyzed.some(x => ["CONFLICTO_CODIGO", "DUP_NOMBRE", "DUP_ARCHIVO"].includes(x.status));
+        filterMode = hasConflicts ? "CONFLICTS" : "ALL";
+        renderReviewStep();
+      } catch (err) {
+        console.error(err);
+        $("#bk_err").textContent = "No se pudo leer el archivo: " + (err.message || err);
+      }
+    };
+  };
+
+  const renderReviewStep = () => {
+    const cnt = st => analyzed.filter(x => x.status === st).length;
+    const cNuevo = cnt("NUEVO");
+    const cAct = cnt("ACTUALIZAR");
+    const cConfCod = cnt("CONFLICTO_CODIGO");
+    const cDupNom = cnt("DUP_NOMBRE");
+    const cDupArc = cnt("DUP_ARCHIVO");
+    const cTotalConf = cConfCod + cDupNom + cDupArc;
+
+    const inFileCodes = new Set(analyzed.map(x => x.item.code));
+    let untouchedCount = 0;
+    for (const code of STATE.materials.keys()) if (!inFileCodes.has(code)) untouchedCount++;
+
+    const visible = analyzed.filter(x => {
+      if (filterMode === "CONFLICTS") return ["CONFLICTO_CODIGO", "DUP_NOMBRE", "DUP_ARCHIVO"].includes(x.status);
+      if (filterMode === "NUEVO") return x.status === "NUEVO";
+      if (filterMode === "ACTUALIZAR") return x.status === "ACTUALIZAR";
+      return true;
+    });
+
+    const willApply = analyzed.filter(x => !["skip", "keep_current"].includes(x.action)).length;
+
+    const badgeFor = st => {
+      if (st === "NUEVO") return `<span class="badge ok">NUEVO</span>`;
+      if (st === "ACTUALIZAR") return `<span class="badge info">ACTUALIZAR</span>`;
+      if (st === "CONFLICTO_CODIGO") return `<span class="badge deficit">CONFLICTO CÓDIGO</span>`;
+      if (st === "DUP_NOMBRE") return `<span class="badge warn">DUPLICADO NOMBRE</span>`;
+      return `<span class="badge warn">REPETIDO EN ARCHIVO</span>`;
+    };
+
+    const actionOptions = x => {
+      if (x.status === "NUEVO") {
+        return `<option value="create" ${x.action === "create" ? "selected" : ""}>Crear insumo nuevo</option>
+                <option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir</option>`;
+      }
+      if (x.status === "ACTUALIZAR") {
+        return `<option value="update" ${x.action === "update" ? "selected" : ""}>Actualizar datos / stock</option>
+                <option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir (dejar igual)</option>`;
+      }
+      if (x.status === "CONFLICTO_CODIGO") {
+        return `<option value="keep_current" ${x.action === "keep_current" ? "selected" : ""}>Mantener actual (ignorar fila)</option>
+                <option value="stock_only" ${x.action === "stock_only" ? "selected" : ""}>Actualizar solo Stock (conservar nombre)</option>
+                <option value="overwrite" ${x.action === "overwrite" ? "selected" : ""}>Sobrescribir nombre y datos</option>`;
+      }
+      if (x.status === "DUP_NOMBRE") {
+        const tc = esc(x.conflictTarget?.code || "");
+        return `<option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir (evitar duplicado)</option>
+                <option value="merge_existing" ${x.action === "merge_existing" ? "selected" : ""}>Actualizar existente (${tc})</option>
+                <option value="create_new" ${x.action === "create_new" ? "selected" : ""}>Crear de todas formas (${esc(x.item.code)})</option>`;
+      }
+      return `<option value="skip" ${x.action === "skip" ? "selected" : ""}>Omitir repetido</option>
+              <option value="apply_dup" ${x.action === "apply_dup" ? "selected" : ""}>Aplicar de todas formas</option>`;
+    };
+
+    d.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div>
+          <h2 style="margin:0">Validación de Carga Masiva</h2>
+          <div class="hint">Archivo: <strong>${esc(meta.fileName)}</strong> (Hoja: ${esc(meta.sheetName)}) · ${analyzed.length} filas leídas${meta.invalid ? ` · ${meta.invalid} filas vacías/incompletas ignoradas` : ""}</div>
+        </div>
+        <button type="button" class="btn-sm" id="bk_back">Cambiar archivo</button>
+      </div>
+
+      <p class="notice" style="margin:10px 0;border-left-color:var(--ok)">
+        <strong>Protección de catálogo activa:</strong> Los <strong>${untouchedCount}</strong> insumos existentes que no vienen en este archivo permanecerán intactos. Los costos actuales tampoco se alteran.
+      </p>
+
+      <div class="bulk-pills">
+        <button type="button" class="bulk-pill ${filterMode === "ALL" ? "on" : ""}" data-bf="ALL">Todos (${analyzed.length})</button>
+        <button type="button" class="bulk-pill ${cTotalConf ? "err" : ""} ${filterMode === "CONFLICTS" ? "on" : ""}" data-bf="CONFLICTS">Conflictos / Duplicados (${cTotalConf})</button>
+        <button type="button" class="bulk-pill ${filterMode === "NUEVO" ? "on" : ""}" data-bf="NUEVO">Nuevos (${cNuevo})</button>
+        <button type="button" class="bulk-pill ${filterMode === "ACTUALIZAR" ? "on" : ""}" data-bf="ACTUALIZAR">Actualizaciones (${cAct})</button>
+      </div>
+
+      ${cConfCod > 0 ? `<div class="bar" style="margin-bottom:10px">
+        <span class="hint">Acción rápida para los <strong>${cConfCod}</strong> conflictos de código:</span>
+        <button type="button" class="btn-sm" id="bk_conf_keep">Mantener todos actuales</button>
+        <button type="button" class="btn-sm" id="bk_conf_stock">Solo actualizar Stock</button>
+        <button type="button" class="btn-sm" id="bk_conf_over">Sobrescribir todos</button>
+      </div>` : ""}
+
+      <div class="tablebox" style="max-height:46vh;overflow-y:auto"><table class="mrp-table">
+        <thead><tr>
+          <th>Fila</th><th>Estado</th><th>Archivo (Código y Descripción)</th><th>En Base Actual</th><th class="num">Stock Archivo</th><th>Decisión</th>
+        </tr></thead>
+        <tbody>
+          ${visible.map(x => {
+            const curObj = x.existingByCode || x.conflictTarget;
+            const curHtml = curObj
+              ? `<div><strong>${esc(curObj.name)}</strong></div><div class="hint"><code>${esc(curObj.code)}</code> · ${esc(curObj.um)} · Stock: ${fmt(curObj.stock)}</div>`
+              : `<span class="hint">— No existe —</span>`;
+            return `<tr>
+              <td class="hint">#${x.item.rowNum}</td>
+              <td>${badgeFor(x.status)}</td>
+              <td>
+                <div><strong>${esc(x.item.name)}</strong></div>
+                <div class="hint"><code>${esc(x.item.code)}</code>${x.item.um ? ` · ${esc(x.item.um)}` : ""}${x.item.type ? ` · ${x.item.type}` : ""}</div>
+                <div class="hint" style="color:var(--brand)">${esc(x.detail)}</div>
+              </td>
+              <td>${curHtml}</td>
+              <td class="num">${x.item.stock !== null ? `<strong>${fmt(x.item.stock)}</strong>` : `<span class="hint">Sin cambio</span>`}</td>
+              <td><select class="bulk-sel" data-bidx="${x.idx}">${actionOptions(x)}</select></td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="6" class="hint" style="text-align:center;padding:18px">No hay filas en esta categoría.</td></tr>`}
+        </tbody>
+      </table></div>
+
+      <div class="err" id="bk_save_err"></div>
+      <div class="bar" style="margin-top:14px">
+        <button type="button" class="primary" id="bk_apply" ${willApply === 0 ? "disabled" : ""}>Confirmar y Aplicar (${willApply} cambios)</button>
+        <button type="button" id="bk_cls2" style="margin-left:auto">Cancelar</button>
+      </div>`;
+
+    $("#bk_cls2").onclick = closeDlg;
+    $("#bk_back").onclick = renderUploadStep;
+    d.querySelectorAll("[data-bf]").forEach(b => b.onclick = () => { filterMode = b.dataset.bf; renderReviewStep(); });
+
+    if ($("#bk_conf_keep")) $("#bk_conf_keep").onclick = () => { analyzed.forEach(x => { if (x.status === "CONFLICTO_CODIGO") x.action = "keep_current"; }); renderReviewStep(); };
+    if ($("#bk_conf_stock")) $("#bk_conf_stock").onclick = () => { analyzed.forEach(x => { if (x.status === "CONFLICTO_CODIGO") x.action = "stock_only"; }); renderReviewStep(); };
+    if ($("#bk_conf_over")) $("#bk_conf_over").onclick = () => { analyzed.forEach(x => { if (x.status === "CONFLICTO_CODIGO") x.action = "overwrite"; }); renderReviewStep(); };
+
+    d.querySelectorAll("[data-bidx]").forEach(sel => {
+      sel.onchange = () => {
+        const entry = analyzed[Number(sel.dataset.bidx)];
+        entry.action = sel.value;
+        const countNow = analyzed.filter(x => !["skip", "keep_current"].includes(x.action)).length;
+        const btn = $("#bk_apply");
+        btn.disabled = countNow === 0;
+        btn.textContent = `Confirmar y Aplicar (${countNow} cambios)`;
+      };
+    });
+
+    $("#bk_apply").onclick = async () => {
+      const btn = $("#bk_apply");
+      btn.disabled = true; btn.textContent = "Guardando en Supabase…";
+      $("#bk_save_err").textContent = "";
+      try {
+        const now = new Date().toISOString();
+        const upsertMap = new Map(); // code -> record
+
+        const mergeWithExisting = (base, it, overwriteName) => ({
+          code: base.code,
+          name: overwriteName ? it.name : base.name,
+          um: it.um ?? base.um ?? "Kg",
+          type: it.type ?? base.type ?? "MP",
+          lead_time: it.lead_time ?? num(base.lead_time) ?? 3,
+          moq: it.moq ?? num(base.moq) ?? 1,
+          rounding: it.rounding ?? (num(base.rounding) || 1),
+          safety_pct: it.safety_pct ?? num(base.safety_pct),
+          stock: it.stock !== null ? it.stock : num(base.stock),
+          cost: num(base.cost),
+          prev_cost: num(base.prev_cost),
+          cost_updated_at: base.cost_updated_at || null,
+          updated_at: now
+        });
+
+        const buildNew = it => ({
+          code: it.code,
+          name: it.name,
+          um: it.um || "Kg",
+          type: it.type || "MP",
+          lead_time: it.lead_time ?? 3,
+          moq: it.moq ?? 1,
+          rounding: it.rounding ?? 1,
+          safety_pct: it.safety_pct ?? 0.2,
+          stock: it.stock ?? 0,
+          cost: 0,
+          prev_cost: 0,
+          updated_at: now
+        });
+
+        let createdCnt = 0, updatedCnt = 0;
+
+        for (const x of analyzed) {
+          if (x.action === "skip" || x.action === "keep_current") continue;
+          const it = x.item;
+          if (x.action === "create" || x.action === "create_new") {
+            upsertMap.set(it.code, buildNew(it));
+            createdCnt++;
+          } else if (x.action === "update" || x.action === "overwrite") {
+            const base = upsertMap.get(it.code) || STATE.materials.get(it.code);
+            upsertMap.set(it.code, base ? mergeWithExisting(base, it, x.action === "overwrite") : buildNew(it));
+            updatedCnt++;
+          } else if (x.action === "stock_only") {
+            const base = upsertMap.get(it.code) || STATE.materials.get(it.code);
+            if (base && it.stock !== null) {
+              upsertMap.set(it.code, { ...base, stock: it.stock, updated_at: now });
+              updatedCnt++;
+            }
+          } else if (x.action === "merge_existing" && x.conflictTarget) {
+            const tCode = x.conflictTarget.code;
+            const base = upsertMap.get(tCode) || STATE.materials.get(tCode);
+            if (base) {
+              upsertMap.set(tCode, mergeWithExisting(base, it, false));
+              updatedCnt++;
+            }
+          } else if (x.action === "apply_dup") {
+            const base = upsertMap.get(it.code) || STATE.materials.get(it.code);
+            upsertMap.set(it.code, base ? mergeWithExisting(base, it, true) : buildNew(it));
+            if (base) updatedCnt++; else createdCnt++;
+          }
+        }
+
+        const records = [...upsertMap.values()];
+        if (!records.length) {
+          closeDlg();
+          return toast("No hubo cambios para aplicar.");
+        }
+
+        await batchUpsert("mrp_materiales", records, "code");
+        records.forEach(rec => STATE.materials.set(rec.code, rec));
+        closeDlg();
+        toast(`Carga masiva aplicada: ${createdCnt} creado(s), ${updatedCnt} actualizado(s). Los demás insumos quedaron intactos.`);
+        if (onDone) onDone(); else renderView();
+      } catch (err) {
+        console.error(err);
+        $("#bk_save_err").textContent = "Error al guardar en Supabase: " + (err.message || err);
+        btn.disabled = false;
+        btn.textContent = "Reintentar Guardar";
+      }
+    };
+  };
+
+  renderUploadStep();
+  d.showModal();
 }
 
 // -------------------- 6. COSTOS DE COMPRA (SIN PÉRDIDA DE FOCO) --------------------
