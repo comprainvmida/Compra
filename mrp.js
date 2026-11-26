@@ -726,7 +726,6 @@ async function exportAnalisisReportExcel() {
       { header: "Consumo", key: "cons", width: 14 },
       { header: "Cob. Ini", key: "cobi", width: 11 },
       { header: "Diferencia", key: "diff", width: 14 },
-      { header: "Propuesta", key: "prop", width: 14 },
       { header: "Decisión Compra", key: "dec", width: 16 },
       { header: "Proveedor", key: "prov", width: 24 },
       { header: "N° O/C", key: "oc", width: 13 },
@@ -743,7 +742,6 @@ async function exportAnalisisReportExcel() {
       { header: "Stock Disp.", key: "stock", width: 14 },
       { header: "Consumo", key: "cons", width: 14 },
       { header: "Diferencia", key: "diff", width: 14 },
-      { header: "Propuesta", key: "prop", width: 14 },
       { header: "Decisión Compra", key: "dec", width: 16 },
       { header: "Costo Unit.", key: "cost", width: 13 },
       { header: "Inversión USD", key: "inv", width: 16 },
@@ -936,19 +934,19 @@ async function exportAnalisisReportPdf() {
     doc.text(`Inversión Total: ${fmtUsd(totInv)}   |   MP: ${fmtUsd(totMp)}   |   ME: ${fmtUsd(totMe)}   |   Insumos: ${rows.length}   |   Déficit: ${defCnt}`, 38, 105);
 
     const head = showAdv
-      ? [["Código", "Insumo", "UM", "Tipo", "Stock", "Consumo", "Dif.", "Propuesta", "Decisión", "Proveedor", "O/C", "Stock Fin", "Inversión", "Estado"]]
-      : [["Código", "Insumo", "UM", "Tipo", "Stock Disp.", "Consumo", "Diferencia", "Propuesta", "Decisión", "Costo Unit.", "Inversión USD", "Estado"]];
+      ? [["Código", "Insumo", "UM", "Tipo", "Stock", "Consumo", "Dif.", "Decisión", "Proveedor", "O/C", "Stock Fin", "Inversión", "Estado"]]
+      : [["Código", "Insumo", "UM", "Tipo", "Stock Disp.", "Consumo", "Diferencia", "Decisión", "Costo Unit.", "Inversión USD", "Estado"]];
 
     const body = rows.map(r => {
       const est = r.noCost ? "SIN COSTO" : r.hasDeficit ? "DÉFICIT" : "OK";
       return showAdv
-        ? [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.suggested), fmt(r.decision), r.comp.provider || "—", r.comp.oc || "—", fmt(r.stockFinal), fmtUsd(r.invUsd), est]
-        : [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.suggested), fmt(r.decision), fmtUsd(r.cost), fmtUsd(r.invUsd), est];
+        ? [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.decision), r.comp.provider || "—", r.comp.oc || "—", fmt(r.stockFinal), fmtUsd(r.invUsd), est]
+        : [r.m.code, r.m.name, r.m.um, r.m.type, fmt(r.stock), fmt(r.c.total), fmt(r.diff), fmt(r.decision), fmtUsd(r.cost), fmtUsd(r.invUsd), est];
     });
 
     const totalRow = showAdv
-      ? ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", "", "", "", fmtUsd(totInv), ""]
-      : ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", "", fmtUsd(totInv), ""];
+      ? ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", "", "", fmtUsd(totInv), ""]
+      : ["", `TOTAL GENERAL (${rows.length} insumos)`, "", "", "", "", "", "", "", fmtUsd(totInv), ""];
     body.push(totalRow);
 
     doc.autoTable({
@@ -1507,11 +1505,12 @@ function renderFormulas(v) {
         <div class="kpi-card ${massOk ? "ok" : "warn"}"><div class="kpi-label">Balance Masa MP</div><div class="kpi-val">${fmt(cb.kgSum, 2)} kg</div><div class="kpi-sub">Meta: ${fmt(sel.batch_size_kg, 0)} kg · ${massOk ? "OK ✓" : "REVISAR (±1%)"}</div></div>
       </div>
 
-      <div class="bar">
-        <select id="bom_add_mat" style="flex:1;min-width:220px">
-          <option value="">+ Agregar insumo a la receta…</option>
-          ${[...STATE.materials.values()].map(m => `<option value="${esc(m.code)}">[${m.type}] ${esc(m.code)} — ${esc(m.name)} (${esc(m.um)})</option>`).join("")}
-        </select>
+      <div class="bar" style="align-items:flex-start">
+        <div class="combo-wrap">
+          <input type="search" id="bom_search_mat" placeholder="Buscar insumo por nombre o código para agregar…" autocomplete="off">
+          <input type="hidden" id="bom_add_mat" value="">
+          <div id="bom_combo_list" class="combo-list" hidden></div>
+        </div>
         <input type="number" id="bom_add_qty" step="any" min="0" placeholder="Cant/Lote" style="width:120px">
         <button id="btn_bom_add" class="primary" style="padding:8px 14px;font-size:.86rem">Agregar</button>
         <button id="btn_bom_newmat" class="btn-sm">+ Crear Insumo</button>
@@ -1555,10 +1554,61 @@ function renderFormulas(v) {
     };
     ["#sk_uc", "#sk_pw", "#sk_bk", "#sk_yp"].forEach(id => $(id).onchange = saveSkuParams);
 
-    $("#btn_bom_add").onclick = async () => {
-      const matCode = $("#bom_add_mat").value;
-      const qty = num($("#bom_add_qty").value);
-      if (!matCode || qty <= 0) return toast("Seleccione un insumo y escriba una cantidad > 0.", true);
+    // Buscador predictivo rápido de insumos para la fórmula
+    const sInp = $("#bom_search_mat");
+    const hCode = $("#bom_add_mat");
+    const cList = $("#bom_combo_list");
+    const qInp = $("#bom_add_qty");
+    const allMats = [...STATE.materials.values()];
+    let hiIdx = -1;
+    let curMatches = [];
+
+    const selectMat = m => {
+      hCode.value = m.code;
+      sInp.value = `${m.code} — ${m.name} (${m.um})`;
+      cList.hidden = true;
+      qInp.focus();
+      qInp.select();
+    };
+
+    const renderCombo = () => {
+      const q = sInp.value.toLowerCase().trim();
+      curMatches = allMats.filter(m => !q || m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)).slice(0, 25);
+      hiIdx = curMatches.length ? 0 : -1;
+      if (!curMatches.length) {
+        cList.innerHTML = `<div class="hint" style="padding:10px">Sin coincidencias. Puede crearlo con "+ Crear Insumo".</div>`;
+      } else {
+        cList.innerHTML = curMatches.map((m, i) => `
+          <button type="button" class="combo-item ${i === hiIdx ? "hi" : ""}" data-ci="${i}">
+            <span><strong>${esc(m.name)}</strong> <span class="hint">(${esc(m.code)})</span></span>
+            <span class="badge ${m.type === "MP" ? "mp" : "me"}">${m.type} · ${esc(m.um)}</span>
+          </button>`).join("");
+        cList.querySelectorAll("[data-ci]").forEach(b => {
+          b.onmousedown = ev => { ev.preventDefault(); selectMat(curMatches[Number(b.dataset.ci)]); };
+        });
+      }
+      cList.hidden = false;
+    };
+
+    sInp.onfocus = renderCombo;
+    sInp.oninput = () => { hCode.value = ""; renderCombo(); };
+    sInp.onblur = () => setTimeout(() => { cList.hidden = true; }, 160);
+    sInp.onkeydown = ev => {
+      if (cList.hidden) return;
+      if (ev.key === "ArrowDown") { ev.preventDefault(); hiIdx = Math.min(curMatches.length - 1, hiIdx + 1); cList.querySelectorAll(".combo-item").forEach((el, i) => el.classList.toggle("hi", i === hiIdx)); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); hiIdx = Math.max(0, hiIdx - 1); cList.querySelectorAll(".combo-item").forEach((el, i) => el.classList.toggle("hi", i === hiIdx)); }
+      else if (ev.key === "Enter" && hiIdx >= 0 && curMatches[hiIdx]) { ev.preventDefault(); selectMat(curMatches[hiIdx]); }
+      else if (ev.key === "Escape") { cList.hidden = true; }
+    };
+
+    const doAddBom = async () => {
+      let matCode = hCode.value;
+      if (!matCode && sInp.value.trim()) {
+        const exact = allMats.find(m => m.code.toLowerCase() === sInp.value.trim().toLowerCase());
+        if (exact) matCode = exact.code;
+      }
+      const qty = num(qInp.value);
+      if (!matCode || qty <= 0) return toast("Busque y seleccione un insumo de la lista y escriba una cantidad > 0.", true);
       const { error } = await sb.from("mrp_bom").upsert({ sku_code: sel.code, mat_code: matCode, qty_per_batch: qty }, { onConflict: "sku_code,mat_code" });
       if (error) return toast(error.message, true);
       if (!STATE.bom.has(sel.code)) STATE.bom.set(sel.code, []);
@@ -1568,7 +1618,11 @@ function renderFormulas(v) {
       toast("Ingrediente agregado.");
       paintList();
       paintDetail();
+      setTimeout(() => $("#bom_search_mat")?.focus(), 40);
     };
+
+    $("#btn_bom_add").onclick = doAddBom;
+    qInp.onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); doAddBom(); } };
 
     $("#btn_bom_newmat").onclick = () => openNewMaterialModal(() => paintDetail());
 
@@ -1717,6 +1771,99 @@ function openDeleteSkuModal(sku) {
     toast("SKU eliminado de Supabase.");
     renderView();
   };
+}
+
+// -------------------- HISTORIAL DE PLANIFICACIONES (VER / RENOMBRAR / ELIMINAR) --------------------
+$("#btn_hist_planes").onclick = () => openPlanHistoryModal();
+
+function openPlanHistoryModal() {
+  const d = $("#dlg");
+  const paintHist = () => {
+    d.innerHTML = `
+      <h2>Historial de Planificaciones</h2>
+      <p class="hint" style="margin:0 0 12px">Cambie de período, renombre o elimine planificaciones que ya no desee ver. Al eliminar un plan se borran sus cantidades y compras asociadas, pero su catálogo de insumos, costos y fórmulas permanecen intactos.</p>
+      <div class="tablebox"><table class="mrp-table">
+        <thead><tr><th>Nombre del Plan</th><th>Creado</th><th>Estado</th><th>Acciones</th></tr></thead>
+        <tbody>
+          ${STATE.planes.map(p => {
+            const isAct = p.id === STATE.activePlanId;
+            return `<tr data-pid="${esc(p.id)}">
+              <td><strong>${esc(p.name)}</strong></td>
+              <td class="hint">${p.created_at ? new Date(p.created_at).toLocaleDateString("es-VE") : "—"}</td>
+              <td>${isAct ? `<span class="badge ok">ACTIVO</span>` : `<span class="hint">Guardado</span>`}</td>
+              <td style="white-space:nowrap">
+                ${isAct ? "" : `<button class="btn-sm primary" data-openp="${esc(p.id)}">Abrir</button>`}
+                <button class="btn-sm" data-renp="${esc(p.id)}">Renombrar</button>
+                <button class="btn-sm btn-danger" data-delp="${esc(p.id)}">Eliminar</button>
+              </td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="4" class="hint" style="text-align:center;padding:16px">No hay planificaciones registradas.</td></tr>`}
+        </tbody>
+      </table></div>
+      <div class="bar" style="margin-top:14px">
+        <button type="button" class="primary" id="hp_new">+ Nueva Planificación</button>
+        <button type="button" id="hp_cls" style="margin-left:auto">Cerrar</button>
+      </div>`;
+
+    $("#hp_cls").onclick = () => d.close();
+    $("#hp_new").onclick = () => { d.close(); $("#btn_new_plan").click(); };
+
+    d.querySelectorAll("[data-openp]").forEach(btn => {
+      btn.onclick = async () => {
+        STATE.activePlanId = btn.dataset.openp;
+        renderPlanSelector();
+        setSync("saving", "Cargando plan…");
+        await loadPlanData(STATE.activePlanId);
+        setSync("ok");
+        d.close();
+        toast("Planificación cargada.");
+      };
+    });
+
+    d.querySelectorAll("[data-renp]").forEach(btn => {
+      btn.onclick = async () => {
+        const p = STATE.planes.find(x => x.id === btn.dataset.renp);
+        if (!p) return;
+        const nuevo = prompt("Nuevo nombre para la planificación:", p.name);
+        if (!nuevo || !nuevo.trim() || nuevo.trim() === p.name) return;
+        const { error } = await sb.from("mrp_planes").update({ name: nuevo.trim(), updated_at: new Date().toISOString() }).eq("id", p.id);
+        if (error) return toast("Error al renombrar: " + error.message, true);
+        p.name = nuevo.trim();
+        renderPlanSelector();
+        toast("Nombre actualizado.");
+        paintHist();
+      };
+    });
+
+    d.querySelectorAll("[data-delp]").forEach(btn => {
+      btn.onclick = async () => {
+        const p = STATE.planes.find(x => x.id === btn.dataset.delp);
+        if (!p) return;
+        if (!confirm(`¿Eliminar permanentemente la planificación "${p.name}"?
+
+Sus fórmulas, catálogo de insumos y costos NO se borrarán.`)) return;
+        const { error } = await sb.from("mrp_planes").delete().eq("id", p.id);
+        if (error) return toast("Error al eliminar: " + error.message, true);
+        STATE.planes = STATE.planes.filter(x => x.id !== p.id);
+        if (!STATE.planes.length) {
+          const { data: created, error: e2 } = await sb.from("mrp_planes").insert({
+            name: "Planificación " + new Date().toISOString().slice(0, 7),
+            is_active: true
+          }).select().single();
+          if (!e2 && created) STATE.planes = [created];
+        }
+        if (STATE.activePlanId === p.id && STATE.planes.length) {
+          STATE.activePlanId = STATE.planes[0].id;
+          await loadPlanData(STATE.activePlanId);
+        }
+        renderPlanSelector();
+        toast(`Planificación "${p.name}" eliminada.`);
+        paintHist();
+      };
+    });
+  };
+  paintHist();
+  d.showModal();
 }
 
 // -------------------- NUEVA PLANIFICACIÓN --------------------
